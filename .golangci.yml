@@ -1,0 +1,39 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    errcheck:
+      check-blank: false
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Printf
+        - fmt.Println
+        - fmt.Sprint
+        - fmt.Sprintln
+        - (*os.File).Close
+        - net/http.ListenAndServe
+    staticcheck:
+      checks: ["all", "-SA1019"]
+  exclusions:
+    rules:
+      # Dot imports are shirei's documented view idiom (upstream README and
+      # demos); the allowance is scoped to the GUI quarantine package.
+      - path: internal/gui/
+        linters:
+          - staticcheck
+        text: "ST1001"
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -1,0 +1,7 @@
+[tools]
+## https://go.dev/doc/devel/release
+go = '1.27'
+## https://github.com/goreleaser/goreleaser/releases
+"goreleaser" = '2.18'
+## https://github.com/golangci/golangci-lint/releases
+"golangci-lint" = '2.13'

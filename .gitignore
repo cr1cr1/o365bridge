@@ -1,0 +1,19 @@
+.vscode/settings.json
+/bin/
+/dist/
+/tmp/
+/tmp/gopath/
+.gocache/
+/config/
+.env
+.*.env
+.state/
+
+/o365bridge
+/o365bridge.*
+
+.omo/
+_o/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
