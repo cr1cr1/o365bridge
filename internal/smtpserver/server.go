@@ -7,10 +7,12 @@ package smtpserver
 import (
 	"bufio"
 	"crypto/subtle"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -27,6 +29,13 @@ const (
 
 // Server serves SMTP submission on a supplied listener.
 type Server struct {
+	// Configure before Serve. Nil TLSConfig preserves plaintext behavior;
+	// otherwise StartTLS selects upgrade mode instead of implicit TLS.
+	TLSConfig *tls.Config
+	StartTLS  bool
+	// TLSHandshakeTimeout defaults to 10 seconds when non-positive.
+	TLSHandshakeTimeout time.Duration
+
 	reg      *bridge.Registry
 	password string
 	logger   zerolog.Logger
@@ -67,6 +76,12 @@ func (s *Server) Serve(l net.Listener) error {
 			return err
 		}
 		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			_ = c.Close()
+			s.wg.Wait()
+			return nil
+		}
 		s.conns[c] = struct{}{}
 		s.wg.Add(1)
 		s.mu.Unlock()
@@ -125,7 +140,36 @@ type session struct {
 
 func (sess *session) resetTxn() { sess.from, sess.hasFrom, sess.rcpts = "", false, nil }
 
+func (s *Server) handshakeTLS(c net.Conn) (*tls.Conn, error) {
+	timeout := s.TLSHandshakeTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	if err := c.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, err
+	}
+	tc := tls.Server(c, s.TLSConfig)
+	if err := tc.Handshake(); err != nil {
+		return nil, err
+	}
+	if err := c.SetDeadline(time.Time{}); err != nil {
+		return nil, err
+	}
+	return tc, nil
+}
+
 func (s *Server) handle(c net.Conn) {
+	defer func() { _ = c.Close() }()
+	if s.TLSConfig != nil && !s.StartTLS {
+		tc, err := s.handshakeTLS(c)
+		if err != nil {
+			s.logger.Warn().Err(err).Str("protocol", "smtp").Str("op", "tls").Str("remote", c.RemoteAddr().String()).Msg("smtp TLS handshake failed")
+			return
+		}
+		c = tc
+	}
+	requireTLS := s.TLSConfig != nil && s.StartTLS
+	upgraded := false
 	r := bufio.NewReader(c)
 	sess := &session{remote: c.RemoteAddr().String()}
 	s.logger.Info().Str("protocol", "smtp").Str("op", "connect").Str("remote", sess.remote).Msg("smtp connection")
@@ -149,12 +193,23 @@ func (s *Server) handle(c net.Conn) {
 		s.logger.Info().Str("protocol", "smtp").Str("op", "command").Str("command", cmd).
 			Str("remote", sess.remote).Str("account", sess.email).Bool("authed", sess.authed).
 			Msg("smtp command")
+		if upgraded && sess.hello != "EHLO" {
+			switch cmd {
+			case "AUTH", "MAIL", "RCPT", "DATA":
+				writeLine(c, "503 5.5.1 Send EHLO after STARTTLS first")
+				continue
+			}
+		}
 		switch cmd {
 		case "EHLO":
 			sess.resetTxn()
 			sess.hello = cmd
 			writeLine(c, "250-"+hostname+" greets "+argOr(arg, "client"))
-			writeLine(c, "250-AUTH PLAIN LOGIN")
+			if requireTLS {
+				writeLine(c, "250-STARTTLS")
+			} else {
+				writeLine(c, "250-AUTH PLAIN LOGIN")
+			}
 			writeLine(c, fmt.Sprintf("250-SIZE %d", maxSize))
 			writeLine(c, "250 8BITMIME")
 		case "HELO":
@@ -162,8 +217,16 @@ func (s *Server) handle(c net.Conn) {
 			sess.hello = cmd
 			writeLine(c, "250 "+hostname+" greets "+argOr(arg, "client"))
 		case "AUTH":
+			if requireTLS {
+				writeLine(c, "530 5.7.0 Must issue STARTTLS first")
+				continue
+			}
 			s.handleAuth(c, r, sess, arg)
 		case "MAIL":
+			if requireTLS {
+				writeLine(c, "530 5.7.0 Must issue STARTTLS first")
+				continue
+			}
 			if !sess.authed {
 				from, _ := parsePath(arg, "FROM:")
 				// hello/auth_advertised pinpoint why a client
@@ -221,12 +284,37 @@ func (s *Server) handle(c net.Conn) {
 			// Never confirm/deny account existence in detail.
 			writeLine(c, "252 2.5.2 Cannot VRFY user, send some mail and see")
 		case "STARTTLS":
-			// Plain v1 by design: no TLS listener is offered. A
-			// client attempting it is misconfigured (it will fail
-			// to send), so this must be visible as a warning.
-			s.logger.Warn().Str("protocol", "smtp").Str("op", "starttls").Str("remote", sess.remote).
-				Str("account", sess.email).Msg("smtp STARTTLS requested but not offered (plain v1)")
-			writeLine(c, "454 4.7.0 TLS not available")
+			if s.TLSConfig == nil {
+				s.logger.Warn().Str("protocol", "smtp").Str("op", "starttls").Str("remote", sess.remote).
+					Str("account", sess.email).Msg("smtp STARTTLS requested but not offered (plain v1)")
+				writeLine(c, "454 4.7.0 TLS not available")
+				continue
+			}
+			if arg != "" {
+				writeLine(c, "501 5.5.4 STARTTLS takes no arguments")
+				continue
+			}
+			if !requireTLS || sess.hello != "EHLO" || sess.authed || sess.hasFrom {
+				writeLine(c, "503 5.5.1 STARTTLS not permitted in current state")
+				continue
+			}
+			// Never carry plaintext read-ahead across the encryption boundary.
+			if r.Buffered() != 0 {
+				s.logger.Warn().Str("protocol", "smtp").Str("op", "starttls").Str("remote", sess.remote).Msg("smtp STARTTLS rejected buffered plaintext")
+				return
+			}
+			// Writes are unbuffered, so this reply reaches the client before TLS.
+			if _, err := fmt.Fprint(c, "220 2.0.0 Ready to start TLS\r\n"); err != nil {
+				return
+			}
+			tc, err := s.handshakeTLS(c)
+			if err != nil {
+				s.logger.Warn().Err(err).Str("protocol", "smtp").Str("op", "tls").Str("remote", sess.remote).Msg("smtp TLS handshake failed")
+				return
+			}
+			c, r = tc, bufio.NewReader(tc)
+			sess = &session{remote: sess.remote}
+			requireTLS, upgraded = false, true
 		case "QUIT":
 			writeLine(c, "221 2.0.0 "+hostname+" closing connection")
 			return
