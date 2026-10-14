@@ -160,7 +160,12 @@ func (s *Server) handle(c net.Conn) {
 				from, _ := parsePath(arg, "FROM:")
 				s.logger.Warn().Str("protocol", "smtp").Str("op", "mail").Str("remote", sess.remote).
 					Str("from", from).Msg("smtp MAIL before authentication")
-				writeLine(c, "503 5.5.1 Authentication required")
+				// RFC 4954 §5: 530 5.7.0 is the standard
+				// "authentication required" reply — the signal
+				// an MTA uses to authenticate (prompting the
+				// user for a password) and then retry. A 503
+				// bad-sequence reply would be treated as fatal.
+				writeLine(c, "530 5.7.0 Authentication required")
 				continue
 			}
 			addr, ok := parsePath(arg, "FROM:")

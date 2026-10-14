@@ -167,8 +167,11 @@ func TestSMTPMailBeforeAuthWarnLogged(t *testing.T) {
 	defer cl.c.Close()
 	cl.cmd(t, "EHLO client.example")
 	r := cl.cmd(t, "MAIL FROM:<user@example.com>")
-	if !strings.HasPrefix(r, "503") {
-		t.Fatalf("MAIL before auth = %q, want 503", r)
+	// RFC 4954: 530 5.7.0 is the standard "authentication
+	// required" reply — the signal an MTA uses to start AUTH and
+	// prompt the user for a password. A 503 would be fatal.
+	if !strings.HasPrefix(r, "530 5.7.0") {
+		t.Fatalf("MAIL before auth = %q, want 530 5.7.0", r)
 	}
 	out := buf.String()
 	for _, want := range []string{`"level":"warn"`, `"protocol":"smtp"`, `"op":"mail"`, `"from":"user@example.com"`} {
@@ -203,6 +206,44 @@ func (b *lockedBuffer) Reset() {
 	b.buf.Reset()
 }
 
+// After a 530, a standard MTA recovers in the same session:
+// AUTH (prompting for the password if needed), then resend.
+func TestSMTPRecoverAfter530ByAuthenticating(t *testing.T) {
+	prov := &fakeProvider{}
+	addr, done := start(t, prov)
+	defer done()
+	cl := dial(t, addr)
+	defer cl.c.Close()
+
+	cl.cmd(t, "EHLO client.example")
+	if r := cl.cmd(t, "MAIL FROM:<%s>", acct); !strings.HasPrefix(r, "530") {
+		t.Fatalf("MAIL before auth = %q, want 530", r)
+	}
+	if r := cl.cmd(t, "AUTH PLAIN %s", authPlain(acct, pw)); !strings.HasPrefix(r, "235") {
+		t.Fatalf("auth after 530 = %q, want 235", r)
+	}
+	if r := cl.cmd(t, "MAIL FROM:<%s>", acct); !strings.HasPrefix(r, "250") {
+		t.Fatalf("MAIL after auth = %q, want 250", r)
+	}
+	if r := cl.cmd(t, "RCPT TO:<dest@example.com>"); !strings.HasPrefix(r, "250") {
+		t.Fatalf("RCPT = %q, want 250", r)
+	}
+	if r := cl.cmd(t, "DATA"); !strings.HasPrefix(r, "354") {
+		t.Fatalf("DATA = %q, want 354", r)
+	}
+	msg := "From: " + acct + "\r\nTo: dest@example.com\r\nSubject: recovered\r\n\r\nhello\r\n.\r\n"
+	if _, err := cl.c.Write([]byte(msg)); err != nil {
+		t.Fatal(err)
+	}
+	if r := cl.readReply(t); !strings.HasPrefix(r, "250") {
+		t.Fatalf("message = %q, want 250", r)
+	}
+	sent := prov.sentCopy()
+	if len(sent) != 1 || !strings.Contains(string(sent[0]), "Subject: recovered") {
+		t.Fatalf("provider sent = %q", sent)
+	}
+}
+
 func authPlain(user, pass string) string {
 	return base64.StdEncoding.EncodeToString([]byte("\x00" + user + "\x00" + pass))
 }
@@ -213,9 +254,10 @@ func TestSMTPAuthFailThenSucceedAndBadSequence(t *testing.T) {
 	cl := dial(t, addr)
 	defer cl.c.Close()
 
-	// MAIL before AUTH -> 503
-	if r := cl.cmd(t, "MAIL FROM:<%s>", acct); !strings.HasPrefix(r, "503") {
-		t.Fatalf("MAIL before auth = %q, want 503", r)
+	// MAIL before AUTH -> 530 5.7.0 (RFC 4954 authentication
+	// required; the client recovers by authenticating).
+	if r := cl.cmd(t, "MAIL FROM:<%s>", acct); !strings.HasPrefix(r, "530 5.7.0") {
+		t.Fatalf("MAIL before auth = %q, want 530 5.7.0", r)
 	}
 	ehlo := cl.cmd(t, "EHLO client.example")
 	for _, want := range []string{"250", "AUTH PLAIN LOGIN", "SIZE 35882577", "8BITMIME"} {
