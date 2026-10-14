@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/alecthomas/kong v1.16.1
+	github.com/cr1cr1/o365bridge/jmap v0.0.0
 	github.com/go-rod/rod v0.116.2
 	github.com/joho/godotenv v1.5.1
 	github.com/rs/zerolog v1.35.1
@@ -19,3 +20,5 @@ require (
 	github.com/ysmood/leakless v0.9.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 )
+
+replace github.com/cr1cr1/o365bridge/jmap => ./jmap

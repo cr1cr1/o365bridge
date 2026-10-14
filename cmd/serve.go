@@ -18,6 +18,7 @@ import (
 	"github.com/cr1cr1/o365bridge/internal/davserver"
 	"github.com/cr1cr1/o365bridge/internal/graph"
 	"github.com/cr1cr1/o365bridge/internal/imapserver"
+	"github.com/cr1cr1/o365bridge/internal/jmapadapter"
 	"github.com/cr1cr1/o365bridge/internal/owa"
 	"github.com/cr1cr1/o365bridge/internal/rodlogin"
 	"github.com/cr1cr1/o365bridge/internal/smtpserver"
@@ -33,6 +34,7 @@ type ServeCmd struct {
 	ImapPort      int    `help:"IMAP listen port" default:"1143"`
 	SmtpPort      int    `help:"SMTP submission listen port" default:"1025"`
 	DavPort       int    `help:"CalDAV/CardDAV HTTP listen port" default:"1080"`
+	JmapPort      int    `help:"JMAP HTTP listen port (0 disables)" default:"8080"`
 	Password      string `help:"Bridge instance password clients use with their email as username (prefer the OB_PASSWORD envar over the flag)"`
 	GraphClientID string `help:"Admin-created Azure app client ID; empty disables Graph and uses OWA directly" default:""`
 	StateDir      string `help:"Session cache directory (accounts, browser profiles, ID maps)" default:""`
@@ -91,7 +93,7 @@ func (s *ServeCmd) Run(d *Deps) error {
 	defer stop()
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 
 	serve := func(name string, port int, fn func(net.Listener) error) {
 		addr := net.JoinHostPort(s.Interface, fmt.Sprint(port))
@@ -116,10 +118,21 @@ func (s *ServeCmd) Run(d *Deps) error {
 		Handler:           davserver.New(reg, s.Password, log.Logger),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
+	var jmapSrv *http.Server
+	if s.JmapPort != 0 {
+		engine, _ := jmapadapter.NewEngine(reg, s.Password, log.Logger)
+		jmapSrv = &http.Server{
+			Handler:           engine.Handler(),
+			ReadHeaderTimeout: 30 * time.Second,
+		}
+	}
 
 	serve("imap", s.ImapPort, imapSrv.Serve)
 	serve("smtp", s.SmtpPort, smtpSrv.Serve)
 	serve("dav", s.DavPort, davSrv.Serve)
+	if jmapSrv != nil {
+		serve("jmap", s.JmapPort, jmapSrv.Serve)
+	}
 
 	if s.GraphClientID == "" {
 		log.Info().Msg("graph disabled (no client ID configured); accounts will use OWA")
@@ -136,6 +149,9 @@ func (s *ServeCmd) Run(d *Deps) error {
 		_ = imapSrv.Close()
 		_ = smtpSrv.Close()
 		_ = davSrv.Close()
+		if jmapSrv != nil {
+			_ = jmapSrv.Close()
+		}
 		wg.Wait()
 		return err
 	}
@@ -145,6 +161,9 @@ func (s *ServeCmd) Run(d *Deps) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = davSrv.Shutdown(shutdownCtx)
+	if jmapSrv != nil {
+		_ = jmapSrv.Shutdown(shutdownCtx)
+	}
 	wg.Wait()
 	return nil
 }
