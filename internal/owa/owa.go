@@ -13,12 +13,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/cr1cr1/o365bridge/internal/bridge"
 )
 
 type Factory struct {
 	BaseURL string
 	HTTP    *http.Client
+	// Logger receives one debug line per upstream service.svc call
+	// (method, action, status, duration_ms) and a warning on
+	// failure. Nil disables logging.
+	Logger *zerolog.Logger
 }
 
 func (f Factory) New(email string, s bridge.Session) bridge.Provider {
@@ -37,7 +43,11 @@ func (f Factory) New(email string, s bridge.Session) bridge.Provider {
 	if c == nil {
 		c = http.DefaultClient
 	}
-	return &provider{email: email, sess: s, base: base, http: c}
+	log := zerolog.Nop()
+	if f.Logger != nil {
+		log = *f.Logger
+	}
+	return &provider{email: email, sess: s, base: base, http: c, log: log}
 }
 
 type provider struct {
@@ -45,6 +55,7 @@ type provider struct {
 	sess  bridge.Session
 	base  string
 	http  *http.Client
+	log   zerolog.Logger
 }
 
 // --- transport ---
@@ -92,21 +103,27 @@ func (p *provider) call(ctx context.Context, action string, payload any) (any, e
 		}
 		req.Header.Set("Cookie", strings.Join(parts, "; "))
 	}
+	start := time.Now()
 	resp, err := p.http.Do(req)
 	if err != nil {
+		p.logUpstream(zerolog.WarnLevel, action, 0, time.Since(start).Milliseconds(), err.Error())
 		return nil, bridge.Wrap(bridge.KindTransient, "owa: "+action, err)
 	}
 	defer resp.Body.Close()
 	var raw map[string]any
 	decErr := json.NewDecoder(resp.Body).Decode(&raw)
+	dur := time.Since(start).Milliseconds()
 	if resp.StatusCode == 440 {
+		p.logUpstream(zerolog.WarnLevel, action, resp.StatusCode, dur, "HTTP 440 login expired")
 		return nil, bridge.Wrap(bridge.KindAuth, fmt.Sprintf("owa: %s: HTTP 440 login expired", action), nil)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		kind := bridge.ClassifyHTTP(resp.StatusCode, "")
+		p.logUpstream(zerolog.WarnLevel, action, resp.StatusCode, dur, fmt.Sprintf("HTTP %d", resp.StatusCode))
 		return nil, bridge.Wrap(kind, fmt.Sprintf("owa: %s: HTTP %d", action, resp.StatusCode), nil)
 	}
 	if decErr != nil {
+		p.logUpstream(zerolog.WarnLevel, action, resp.StatusCode, dur, "decode response: "+decErr.Error())
 		return nil, bridge.Wrap(bridge.KindTransient, "owa: "+action+": decode response", decErr)
 	}
 	var result any = raw
@@ -120,10 +137,27 @@ func (p *provider) call(ctx context.Context, action string, payload any) (any, e
 	}
 	if m, ok := result.(map[string]any); ok {
 		if mt := str(m, "MessageText"); mt != "" {
+			p.logUpstream(zerolog.WarnLevel, action, resp.StatusCode, dur, mt)
 			return nil, fmt.Errorf("owa: %s: %s", action, mt)
 		}
 	}
+	p.logUpstream(zerolog.DebugLevel, action, resp.StatusCode, dur, "")
 	return result, nil
+}
+
+// logUpstream emits one line per upstream service.svc round trip:
+// duration, action and status per account; failures as warnings.
+// Never the credentials, cookies or payload bodies.
+func (p *provider) logUpstream(level zerolog.Level, action string, status int, durMS int64, errMsg string) {
+	ev := p.log.WithLevel(level).
+		Str("channel", "owa").Str("op", "http").Str("method", http.MethodPost).
+		Str("action", action).Str("account", p.email).Int("status", status).
+		Int64("duration_ms", durMS)
+	if errMsg != "" {
+		ev.Str("error", errMsg).Msg("owa upstream request failed")
+		return
+	}
+	ev.Msg("owa upstream request")
 }
 
 // --- tolerant JSON navigation helpers ---

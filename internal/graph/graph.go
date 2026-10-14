@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/cr1cr1/o365bridge/internal/bridge"
 )
 
@@ -21,6 +23,10 @@ const defaultBaseURL = "https://graph.microsoft.com"
 type Factory struct {
 	BaseURL string
 	HTTP    *http.Client
+	// Logger receives one debug line per upstream Graph call
+	// (method, resource, status, duration_ms) and a warning on
+	// failure. Nil disables logging.
+	Logger *zerolog.Logger
 }
 
 // New implements bridge.Factory.
@@ -33,7 +39,11 @@ func (f Factory) New(email string, s bridge.Session) bridge.Provider {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &provider{email: email, session: s, baseURL: strings.TrimRight(base, "/"), http: client}
+	log := zerolog.Nop()
+	if f.Logger != nil {
+		log = *f.Logger
+	}
+	return &provider{email: email, session: s, baseURL: strings.TrimRight(base, "/"), http: client, log: log}
 }
 
 var _ bridge.Factory = Factory{}
@@ -44,6 +54,7 @@ type provider struct {
 	session bridge.Session
 	baseURL string
 	http    *http.Client
+	log     zerolog.Logger
 }
 
 type graphError struct {
@@ -95,16 +106,20 @@ func (p *provider) doBytes(ctx context.Context, method, resource string, payload
 	for k, v := range extraHeaders {
 		req.Header.Set(k, v)
 	}
+	start := time.Now()
 	resp, err := p.http.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		p.logUpstream(zerolog.WarnLevel, method, resource, 0, time.Since(start).Milliseconds(), err.Error())
 		return nil, bridge.Wrap(bridge.KindTransient, "graph: network error", err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
+	dur := time.Since(start).Milliseconds()
 	if err != nil {
+		p.logUpstream(zerolog.WarnLevel, method, resource, resp.StatusCode, dur, "read response: "+err.Error())
 		return nil, bridge.Wrap(bridge.KindTransient, "graph: read response", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -121,9 +136,27 @@ func (p *provider) doBytes(ctx context.Context, method, resource string, payload
 		if code != "" {
 			cause = "code=" + code + ": " + msg
 		}
+		p.logUpstream(zerolog.WarnLevel, method, resource, resp.StatusCode, dur, cause)
 		return nil, bridge.Wrap(bridge.ClassifyHTTP(resp.StatusCode, code), detail, fmt.Errorf("%s", cause))
 	}
+	p.logUpstream(zerolog.DebugLevel, method, resource, resp.StatusCode, dur, "")
 	return data, nil
+}
+
+// logUpstream emits one line per upstream Graph round trip: duration,
+// method, resource and status per account; failures as warnings.
+// Never the token, headers or bodies. The resource may carry user
+// query terms; that is the point of the log line.
+func (p *provider) logUpstream(level zerolog.Level, method, resource string, status int, durMS int64, errMsg string) {
+	ev := p.log.WithLevel(level).
+		Str("channel", "graph").Str("op", "http").Str("method", method).
+		Str("resource", resource).Str("account", p.email).Int("status", status).
+		Int64("duration_ms", durMS)
+	if errMsg != "" {
+		ev.Str("error", errMsg).Msg("graph upstream request failed")
+		return
+	}
+	ev.Msg("graph upstream request")
 }
 
 func (p *provider) doJSON(ctx context.Context, method, resource string, body, out any) error {

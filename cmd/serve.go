@@ -70,8 +70,8 @@ func (s *ServeCmd) Run(d *Deps) error {
 	login := rodlogin.New(stateDir, s.GraphClientID, log.Logger)
 	login.BrowserPath = s.BrowserPath
 
-	graphFactory := graph.Factory{}
-	owaFactory := owa.Factory{}
+	graphFactory := graph.Factory{Logger: &log.Logger}
+	owaFactory := owa.Factory{Logger: &log.Logger}
 	factory := bridge.FactoryFunc(func(email string, sess bridge.Session) bridge.Provider {
 		if sess.Channel == bridge.ChannelGraph {
 			return graphFactory.New(email, sess)
