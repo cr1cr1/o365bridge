@@ -63,17 +63,18 @@ which is accepted behaviour, not a defect.
 - Mail "labelling" means filing into folders; mail category/tag mapping remains
   outside scope. Calendar event category names are mapped to CalDAV CATEGORIES
   under the later event-category request; master-category colors/catalogs and
-  task/contact category mapping remain outside scope.
+  contact category mapping remain outside scope. Native task category names are
+  also mapped under the subsequent task-detail request.
 
 ## Non-goals (first version)
 
 - EWS (Microsoft disables it on Office 365 from 2026-10-01) and EAS —
   dropped entirely, not just deferred.
 - OneDrive / files over WebDAV. JMAP (possible later addition).
-- Server-side Outlook rules; mail/task/contact categories and Outlook master-category
+- Server-side Outlook rules; mail/contact categories and Outlook master-category
   palettes; shared mailboxes and the corporate GAL are out unless they fall out
-  naturally (builder: do not build them deliberately). Calendar event category
-  names are the explicitly requested exception.
+  naturally (builder: do not build them deliberately). Event and task category
+  names are explicitly requested exceptions.
 - Personal Microsoft accounts (see Goals). Windows and macOS are
   secondary: **Linux desktop is the only v1 gate**; other OSes must
   not block it.
@@ -479,7 +480,8 @@ leave the cloud field unchanged. Conditional VEVENT PUTs reject stale If-Match
 values before update/response and do not recreate missing events. Refresh old
 client caches before editing; unconditional writes and external edits between
 read/write are not protected by an atomic cloud precondition. Category palettes,
-mail/task/contact categories, and a JMAP category schema remain outside scope.
+mail/contact categories, and a JMAP category schema remain outside scope. Task
+category names are now supported under the task-detail follow-up.
 See the [event-category design](<2026-10-15-event-categories-design.md>).
 
 Native task readback is repaired separately from appointments. Task collections
@@ -498,6 +500,21 @@ completion/reopening, and selective deletion. See the
 [task readback design](<2026-10-14-task-readback-design.md>) for evidence and limits.
 Live Thunderbird/tenant acceptance remains owner-run.
 
+Task detail synchronization now includes native category names, plain-note
+projection with rich-note preservation on unrelated edits, DATE-only metadata,
+strict scheduled repetition and authenticated native file links/downloads. A
+full Task PUT clears supported absent fields; partial provider edits preserve
+unsupplied fields. Task If-Match checks precede mutation, and unchanged notes,
+reminders, progress/state and unsupported repeat metadata remain untouched.
+File metadata is listed without fetching bytes; account/list/task/file ownership
+is revalidated for download, including registry recovery. Downloads are bounded
+to 32 MiB, attachment-disposition, nosniff and private/no-store. Upload/delete,
+embedded items/reference links and VTODO alarm editing are not implemented.
+Graph task/date-extension updates are separate, non-atomic requests with errors
+propagated and retry of the same task. No new task-content store or auth channel.
+See the [task-detail design/evidence carrier](<../../aegis/work/2026-10-15-task-details/10-intent.md>)
+for the requested field boundaries and remaining live checks.
+
 Known fidelity limits, all explicit rather than silent:
 
 - **Legacy task identity:** tasks created before client-UID metadata was saved
@@ -512,10 +529,12 @@ Known fidelity limits, all explicit rather than silent:
   from series occurrences before changing UIDs; debug counters reveal duplicate
   UIDs and date-filtered records without exposing event contents.
 
-- **Graph recurrence on write:** bridge RRULE strings are not yet
-  converted to Graph's structured recurrence, so recurring
-  events/tasks written via Graph lose their recurrence. OWA
-  converts a minimal subset (FREQ/INTERVAL/COUNT/UNTIL).
+- **Event recurrence on write:** Graph event RRULE conversion remains absent,
+  and OWA event conversion remains minimal. Task repetition now has separate
+  strict OWA/Graph codecs for common native patterns/ranges; unsupported rules,
+  completion-relative regeneration and ambiguous timezone cutoffs are preserved
+  or explicitly rejected instead of silently changed. Native month-end/leap-day
+  expansion and real tenant date display remain owner-run acceptance checks.
 - **OWA large mail:** sends always use one `MimeContent` payload;
   `_o`'s >4MB attachment-splitting upload path is not implemented.
 - **Graph append is non-atomic:** create-draft → move → flag PATCH;

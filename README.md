@@ -161,8 +161,9 @@ category in a full CalDAV PUT clears it upstream. Programmatic/JMAP provider
 updates that do not supply this field leave cloud categories unchanged.
 
 This maps names only, not Outlook's master-category catalog or color palette.
-Thunderbird category colors are local client settings. Mail tags, task/contact
-categories, and a JMAP category mapping are outside this change. HTTP-backed
+Thunderbird category colors are local client settings. Mail tags, contact
+categories, and a JMAP category mapping remain outside scope; task category names
+are supported separately as described below. HTTP-backed
 regressions cover cloud readback through GET/query/multiget, category edits and
 clearing, and same-title sibling isolation; live client/tenant acceptance remains
 an owner-run check.
@@ -203,6 +204,48 @@ reconstruction, query/multiget, update, completion/reopening, deletion, and
 legacy cloud-ID fallback. These are not a live Thunderbird/Microsoft acceptance
 check. Advanced recurring-task exceptions and complete reminder/progress
 fidelity remain limited.
+
+### Task details and files
+
+Task category names and plain notes now map end to end. Native HTML-only notes
+are presented as plain DESCRIPTION text; unchanged notes retain their original
+rich formatting upstream. Existing reminders and native progress/state are
+preserved on unrelated edits rather than reset to a guessed value. Reminder
+editing through VTODO alarms is still unsupported.
+
+Thunderbird DATE-only start/due values retain DATE precision through restart,
+using native task metadata. Existing ISO date/time values remain supported;
+invalid nonempty dates fail explicitly instead of disappearing. No guessed
+UTC-midnight/noon or tenant-timezone rewrite is applied. Graph full task updates
+clear omitted nullable dates/notes; partial provider updates leave unsupplied
+fields alone. Graph task updates and DATE-metadata extension updates are separate,
+non-atomic requests; failure is returned and retry uses the same task.
+
+Common scheduled repetition maps through native task-specific schemas: daily,
+selected weekdays/weekly intervals, month dates or supported ordinal weekdays,
+yearly dates, and count/end-date ranges. Invalid or unrepresentable rules are
+rejected before writing. Completion-relative regeneration, arbitrary relative
+weekday subsets, incompatible timezone ranges, and recurrence exceptions are
+not silently changed to a different schedule. Unsupported native repetition is
+preserved on ordinary edits. Native clamp/skip behavior for month-end/leap dates
+and actual task timezone display still need live acceptance.
+
+Existing native **file attachments** appear as authenticated bridge ATTACH links.
+GET/HEAD downloads use the bridge email/password, validate account/list/task/file
+ownership, and are bounded to 32 MiB per file; content is never cached locally or
+fetched from caller-supplied URLs. Files are served as downloads with safe MIME
+and filename headers. A client opening the link may prompt separately for bridge
+authentication. Embedded items, cloud reference/source links, and native file
+**upload/delete synchronization are not implemented**. New/changed attachment
+references are rejected rather than reported as uploaded; clients omitting
+attachment properties preserve existing native files.
+
+Restart the rebuilt bridge and **synchronize the remote Tasks collection before
+editing cached tasks**. Stale conditional task PUTs return 412 before updates;
+refresh and retry. Unconditional full PUTs still require fresh data. If a due
+date/note is still absent, provide the sanitized native field value and emitted
+VTODO field from the same refresh; basic support exists, so the live cause cannot
+be inferred from the symptom alone.
 
 ## JMAP
 

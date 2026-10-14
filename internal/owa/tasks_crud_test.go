@@ -44,6 +44,7 @@ func TestOWATasksUpdateFullRepresentation(t *testing.T) {
 			f, p := newFake(t, func(string, map[string]any) any {
 				return okBody(map[string]any{"ResponseClass": "Success", "ResponseCode": "NoError"})
 			})
+			tc.task.FullUpdate = true
 			if err := p.UpdateTask(context.Background(), tc.task); err != nil {
 				t.Fatal(err)
 			}

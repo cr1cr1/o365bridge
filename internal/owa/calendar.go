@@ -474,26 +474,52 @@ func (p *provider) FreeBusy(ctx context.Context, emails []string, from, to time.
 
 // --- tasks ---
 
-const taskUIDPropertyName = "O365BridgeTaskUID"
+const (
+	taskUIDPropertyName           = "O365BridgeTaskUID"
+	taskStartDateOnlyPropertyName = "O365BridgeTaskStartDateOnly"
+	taskDueDateOnlyPropertyName   = "O365BridgeTaskDueDateOnly"
+)
 
-func taskUIDField() map[string]any {
-	return map[string]any{"DistinguishedPropertySetId": "PublicStrings", "PropertyName": taskUIDPropertyName, "PropertyType": "String"}
+func taskNamedField(name string) map[string]any {
+	return map[string]any{"DistinguishedPropertySetId": "PublicStrings", "PropertyName": name, "PropertyType": "String"}
+}
+
+func taskUIDField() map[string]any { return taskNamedField(taskUIDPropertyName) }
+
+func taskNamedString(item map[string]any, name string) (string, bool) {
+	for _, property := range arr(item, "ExtendedProperty") {
+		field := dig(property, "ExtendedFieldURI")
+		publicStrings := str(field, "DistinguishedPropertySetId") == "PublicStrings" || strings.EqualFold(str(field, "PropertySetId"), "00020329-0000-0000-C000-000000000046")
+		if publicStrings && str(field, "PropertyName") == name && str(field, "PropertyType") == "String" {
+			value, present := dig(property, "Value").(string)
+			return value, present
+		}
+	}
+	return "", false
+}
+
+func taskBodyText(item map[string]any) string {
+	if value, present := dig(item, "TextBody", "Value").(string); present {
+		return value
+	}
+	return bridge.PlainTextBody(str(item, "Body", "Value"), str(item, "Body", "BodyType"))
 }
 
 func taskFromItem(item map[string]any, listID string) bridge.Task {
 	t := bridge.Task{
 		ID: str(item, "ItemId", "Id"), ListID: listID, Title: str(item, "Subject"),
-		Body: bodyText(item),
+		Body: taskBodyText(item), Attachments: taskAttachmentsFromItem(item),
 	}
-	// Tasks have no native iCalendar UID; keep client identity in a named property.
-	for _, property := range arr(item, "ExtendedProperty") {
-		field := dig(property, "ExtendedFieldURI")
-		publicStrings := str(field, "DistinguishedPropertySetId") == "PublicStrings" || strings.EqualFold(str(field, "PropertySetId"), "00020329-0000-0000-C000-000000000046")
-		if publicStrings && str(field, "PropertyName") == taskUIDPropertyName && str(field, "PropertyType") == "String" {
-			t.UID = str(property, "Value")
-			break
+	if categories := arr(item, "Categories"); categories != nil {
+		t.Categories = make([]string, 0, len(categories))
+		for _, value := range categories {
+			if category, ok := value.(string); ok {
+				t.Categories = append(t.Categories, category)
+			}
 		}
 	}
+	// Tasks have no native iCalendar UID; keep client identity in a named property.
+	t.UID, _ = taskNamedString(item, taskUIDPropertyName)
 	if t.UID == "" {
 		t.UID = t.ID
 	}
@@ -510,6 +536,22 @@ func taskFromItem(item map[string]any, listID string) bridge.Task {
 	if s := firstNonEmpty(str(item, "CompleteDate"), str(item, "TaskCompleteDate")); s != "" {
 		if v := parseTime(s); !v.IsZero() {
 			t.Completed = &v
+		}
+	}
+	// A literal date is evidence of DATE precision; midnight is not. Companion
+	// metadata preserves client DATE values after the service returns date-times.
+	t.StartDateOnly = t.Start != nil && len(str(item, "StartDate")) == 10
+	t.DueDateOnly = t.Due != nil && len(firstNonEmpty(str(item, "DueDate"), str(item, "TaskDueDate"))) == 10
+	for _, precision := range []struct {
+		name string
+		flag *bool
+	}{
+		{taskStartDateOnlyPropertyName, &t.StartDateOnly}, {taskDueDateOnlyPropertyName, &t.DueDateOnly},
+	} {
+		if value, present := taskNamedString(item, precision.name); present {
+			if parsed, err := strconv.ParseBool(value); err == nil {
+				*precision.flag = parsed
+			}
 		}
 	}
 	switch str(item, "Importance") {
@@ -534,7 +576,7 @@ func taskFromItem(item map[string]any, listID string) bridge.Task {
 			t.Reminder = &v
 		}
 	}
-	t.Recur = recurrenceToRRULE(item)
+	t.Recur, t.RecurStart, t.RecurTimeZone, t.RecurUnsupported = taskRecurrenceFromOWA(item)
 	return t
 }
 func firstNonEmpty(a, b string) string {
@@ -549,9 +591,15 @@ func taskToOWA(t bridge.Task) map[string]any {
 		"__type": "Task:#Exchange", "Subject": t.Title,
 		"Body": map[string]any{"__type": "BodyContentType:#Exchange", "BodyType": "Text", "Value": t.Body},
 	}
+	var properties []any
 	if t.UID != "" {
-		item["ExtendedProperty"] = []any{map[string]any{"ExtendedFieldURI": taskUIDField(), "Value": t.UID}}
+		properties = append(properties, map[string]any{"ExtendedFieldURI": taskUIDField(), "Value": t.UID})
 	}
+	properties = append(properties,
+		map[string]any{"ExtendedFieldURI": taskNamedField(taskStartDateOnlyPropertyName), "Value": strconv.FormatBool(t.StartDateOnly)},
+		map[string]any{"ExtendedFieldURI": taskNamedField(taskDueDateOnlyPropertyName), "Value": strconv.FormatBool(t.DueDateOnly)},
+	)
+	item["ExtendedProperty"] = properties
 	if t.Due != nil {
 		item["DueDate"] = fmtTime(*t.Due)
 	}
@@ -580,16 +628,50 @@ func taskToOWA(t bridge.Task) map[string]any {
 		item["ReminderIsSet"] = true
 		item["ReminderDueBy"] = fmtTime(*t.Reminder)
 	}
-	if rec := rruleToRecurrence(t.Recur, timeOrZero(t.Start)); rec != nil {
-		item["Recurrence"] = rec
+	if t.Categories != nil {
+		item["Categories"] = t.Categories
 	}
 	return item
 }
-func timeOrZero(t *time.Time) time.Time {
-	if t == nil {
-		return time.Time{}
+
+func validateTaskReadDates(item map[string]any) error {
+	for _, field := range []string{"StartDate", "DueDate", "TaskDueDate", "CompleteDate", "TaskCompleteDate", "ReminderDueBy"} {
+		value, present := item[field]
+		if !present || value == nil || value == "" {
+			continue
+		}
+		text, isString := value.(string)
+		if !isString || parseTime(text).IsZero() {
+			return fmt.Errorf("owa: ListTasks: invalid native %s", field)
+		}
 	}
-	return *t
+	return nil
+}
+
+func validateTaskWriteDates(t bridge.Task) error {
+	for _, field := range []struct {
+		name  string
+		value *time.Time
+	}{{"StartDate", t.Start}, {"DueDate", t.Due}, {"CompleteDate", t.Completed}, {"ReminderDueBy", t.Reminder}} {
+		if field.value != nil && field.value.IsZero() {
+			return fmt.Errorf("owa: invalid task %s", field.name)
+		}
+	}
+	return nil
+}
+
+func taskRecurrenceForWrite(t bridge.Task) (map[string]any, error) {
+	if t.RecurUnsupported {
+		return nil, fmt.Errorf("owa: unsupported task recurrence cannot be changed")
+	}
+	var anchor time.Time
+	for _, candidate := range []*time.Time{t.RecurStart, t.Start, t.Due} {
+		if candidate != nil && !candidate.IsZero() {
+			anchor = *candidate
+			break
+		}
+	}
+	return taskRecurrenceToOWA(t.Recur, anchor, t.RecurTimeZone, t.RecurStart, t.Start, t.Due)
 }
 
 func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task, error) {
@@ -597,14 +679,16 @@ func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task,
 	var properties []any
 	// GetItem property URIs differ from the translated UpdateItem field names.
 	for _, field := range []string{
-		"item:Subject", "item:Body", "item:TextBody", "item:Importance", "task:DueDate", "task:StartDate", "task:CompleteDate",
+		"item:Subject", "item:Body", "item:TextBody", "item:Importance", "item:Categories", "item:Attachments", "item:HasAttachments", "task:DueDate", "task:StartDate", "task:CompleteDate",
 		"task:PercentComplete", "task:Status", "task:IsComplete", "item:ReminderDueBy", "item:ReminderIsSet", "task:Recurrence",
 	} {
 		properties = append(properties, propURI(field))
 	}
-	uidField := taskUIDField()
-	uidField["__type"] = "ExtendedPropertyUri:#Exchange"
-	properties = append(properties, uidField)
+	for _, name := range []string{taskUIDPropertyName, taskStartDateOnlyPropertyName, taskDueDateOnlyPropertyName} {
+		field := taskNamedField(name)
+		field["__type"] = "ExtendedPropertyUri:#Exchange"
+		properties = append(properties, field)
+	}
 	shape := map[string]any{"__type": "ItemResponseShape:#Exchange", "BaseShape": "Default", "AdditionalProperties": properties}
 	var out []bridge.Task
 	seen := map[string]bool{}
@@ -642,6 +726,9 @@ func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task,
 				return nil, err
 			}
 			for _, item := range allItems(full) {
+				if err := validateTaskReadDates(item); err != nil {
+					return nil, err
+				}
 				task := taskFromItem(item, listID)
 				typ := str(item, "__type")
 				if !pending[task.ID] || (typ != "" && typ != "Task:#Exchange") {
@@ -672,9 +759,20 @@ func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task,
 }
 
 func (p *provider) CreateTask(ctx context.Context, t bridge.Task) (bridge.Task, error) {
+	if err := validateTaskWriteDates(t); err != nil {
+		return bridge.Task{}, err
+	}
+	recurrence, err := taskRecurrenceForWrite(t)
+	if err != nil {
+		return bridge.Task{}, err
+	}
 	listID := orDefault(t.ListID, "tasks")
+	item := taskToOWA(t)
+	if recurrence != nil {
+		item["Recurrence"] = recurrence
+	}
 	req := envelope("CreateItemJsonRequest:#Exchange", "CreateItemRequest:#Exchange", map[string]any{
-		"Items": []any{taskToOWA(t)}, "SavedItemFolderId": targetFolder(listID),
+		"Items": []any{item}, "SavedItemFolderId": targetFolder(listID),
 	})
 	res, err := p.call(ctx, "CreateItem", req)
 	if err != nil {
@@ -699,27 +797,78 @@ func (p *provider) UpdateTask(ctx context.Context, t bridge.Task) error {
 	if t.ID == "" {
 		return fmt.Errorf("owa: UpdateTask: missing task id")
 	}
+	if err := validateTaskWriteDates(t); err != nil {
+		return err
+	}
+	var recurrence map[string]any
+	if t.RecurSet {
+		var err error
+		recurrence, err = taskRecurrenceForWrite(t)
+		if err != nil {
+			return err
+		}
+	}
 	var updates []any
 	item := taskToOWA(t)
 	taskItem := func(k string, v any) map[string]any { return map[string]any{"__type": "Task:#Exchange", k: v} }
-	// UpdateTask receives a full VTODO representation, not a sparse patch.
-	for _, field := range []string{"Subject", "Body", "Importance"} {
-		updates = setField(updates, "Task", field, taskItem(field, item[field]))
+	for _, field := range []struct {
+		name string
+		set  bool
+	}{
+		{"Subject", t.FullUpdate || t.Title != ""},
+		{"Body", !t.BodyUnchanged && (t.FullUpdate || t.Body != "")},
+		{"Importance", t.FullUpdate || t.Priority != 0},
+		{"Categories", t.Categories != nil},
+	} {
+		if field.set {
+			updates = setField(updates, "Task", field.name, taskItem(field.name, item[field.name]))
+		}
 	}
 	for _, field := range []string{"DueDate", "StartDate", "CompleteDate"} {
+		if field == "CompleteDate" && t.StatusUnchanged {
+			continue
+		}
 		if value, exists := item[field]; exists {
 			updates = setField(updates, "Task", "Task"+field, taskItem(field, value))
-		} else {
+		} else if t.FullUpdate {
 			updates = append(updates, map[string]any{"__type": "DeleteItemField:#Exchange", "Path": propURI("Task" + field)})
 		}
 	}
 	// PercentComplete also changes native Status and clears completion on reopen.
-	updates = setField(updates, "Task", "TaskPercentComplete", taskItem("PercentComplete", item["PercentComplete"]))
-	if t.UID != "" {
-		path := taskUIDField()
+	if !t.StatusUnchanged && (t.FullUpdate || t.Status != "" || t.Completed != nil) {
+		updates = setField(updates, "Task", "TaskPercentComplete", taskItem("PercentComplete", item["PercentComplete"]))
+	}
+	if t.Reminder != nil {
+		updates = setField(updates, "Task", "ReminderIsSet", taskItem("ReminderIsSet", true))
+		updates = setField(updates, "Task", "ReminderDueBy", taskItem("ReminderDueBy", item["ReminderDueBy"]))
+	} else if t.FullUpdate {
+		updates = setField(updates, "Task", "ReminderIsSet", taskItem("ReminderIsSet", false))
+	}
+	if t.RecurSet {
+		if recurrence != nil {
+			updates = setField(updates, "Task", "Recurrence", taskItem("Recurrence", recurrence))
+		} else {
+			updates = append(updates, map[string]any{"__type": "DeleteItemField:#Exchange", "Path": propURI("Recurrence")})
+		}
+	}
+	setNamedString := func(name, value string) {
+		path := taskNamedField(name)
 		path["__type"] = "ExtendedPropertyUri:#Exchange"
+		property := map[string]any{"ExtendedFieldURI": taskNamedField(name), "Value": value}
 		updates = append(updates, map[string]any{"__type": "SetItemField:#Exchange", "Path": path,
-			"Item": taskItem("ExtendedProperty", item["ExtendedProperty"])})
+			"Item": taskItem("ExtendedProperty", []any{property})})
+	}
+	if t.UID != "" {
+		setNamedString(taskUIDPropertyName, t.UID)
+	}
+	if t.FullUpdate || t.Start != nil {
+		setNamedString(taskStartDateOnlyPropertyName, strconv.FormatBool(t.StartDateOnly))
+	}
+	if t.FullUpdate || t.Due != nil {
+		setNamedString(taskDueDateOnlyPropertyName, strconv.FormatBool(t.DueDateOnly))
+	}
+	if len(updates) == 0 {
+		return nil
 	}
 	req := envelope("UpdateItemJsonRequest:#Exchange", "UpdateItemRequest:#Exchange", map[string]any{
 		"ItemChanges":        []any{map[string]any{"__type": "ItemChange:#Exchange", "ItemId": itemID(t.ID), "Updates": updates}},

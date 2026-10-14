@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -111,7 +112,20 @@ func (p *provider) call(ctx context.Context, action string, payload any) (any, e
 	}
 	defer resp.Body.Close()
 	var raw map[string]any
-	decErr := json.NewDecoder(resp.Body).Decode(&raw)
+	var decErr error
+	if action == "GetAttachment" {
+		if resp.ContentLength > maxTaskAttachmentResponseBytes {
+			decErr = fmt.Errorf("attachment response exceeds size limit")
+		} else {
+			limited := &io.LimitedReader{R: resp.Body, N: maxTaskAttachmentResponseBytes + 1}
+			decErr = json.NewDecoder(limited).Decode(&raw)
+			if limited.N == 0 {
+				decErr = fmt.Errorf("attachment response exceeds size limit")
+			}
+		}
+	} else {
+		decErr = json.NewDecoder(resp.Body).Decode(&raw)
+	}
 	dur := time.Since(start)
 	if resp.StatusCode == 440 {
 		p.logUpstream(zerolog.WarnLevel, action, resp.StatusCode, dur, "HTTP 440 login expired")

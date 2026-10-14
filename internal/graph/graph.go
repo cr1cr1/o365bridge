@@ -64,6 +64,13 @@ type graphError struct {
 	} `json:"error"`
 }
 
+type graphHTTPError struct {
+	statusCode int
+	message    string
+}
+
+func (e *graphHTTPError) Error() string { return e.message }
+
 // do performs a JSON request. resource is "/me/..." (v1.0 is prepended) or
 // an absolute URL (pagination links). Returns raw body on 2xx.
 func (p *provider) do(ctx context.Context, method, resource string, body any, extraHeaders map[string]string) ([]byte, error) {
@@ -82,6 +89,11 @@ func (p *provider) do(ctx context.Context, method, resource string, body any, ex
 // doBytes performs a request with a pre-encoded payload (raw-MIME endpoints
 // take base64 text/plain instead of JSON).
 func (p *provider) doBytes(ctx context.Context, method, resource string, payload []byte, contentType string, extraHeaders map[string]string) ([]byte, error) {
+	return p.doBytesLimit(ctx, method, resource, payload, contentType, extraHeaders, 0)
+}
+
+// doBytesLimit shares authentication and error handling with normal Graph calls.
+func (p *provider) doBytesLimit(ctx context.Context, method, resource string, payload []byte, contentType string, extraHeaders map[string]string, maxBytes int64) ([]byte, error) {
 	if p.session.AccessToken == "" {
 		return nil, bridge.AuthError("graph: missing access token")
 	}
@@ -116,11 +128,19 @@ func (p *provider) doBytes(ctx context.Context, method, resource string, payload
 		return nil, bridge.Wrap(bridge.KindTransient, "graph: network error", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	var responseBody io.Reader = resp.Body
+	if maxBytes > 0 {
+		responseBody = io.LimitReader(resp.Body, maxBytes+1)
+	}
+	data, err := io.ReadAll(responseBody)
 	dur := time.Since(start)
 	if err != nil {
 		p.logUpstream(zerolog.WarnLevel, method, resource, resp.StatusCode, dur, "read response: "+err.Error())
 		return nil, bridge.Wrap(bridge.KindTransient, "graph: read response", err)
+	}
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		p.logUpstream(zerolog.WarnLevel, method, resource, resp.StatusCode, dur, "response exceeds download limit")
+		return nil, bridge.Wrap(bridge.KindOther, "graph: task attachment exceeds download limit", nil)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		code, msg := "", ""
@@ -137,7 +157,7 @@ func (p *provider) doBytes(ctx context.Context, method, resource string, payload
 			cause = "code=" + code + ": " + msg
 		}
 		p.logUpstream(zerolog.WarnLevel, method, resource, resp.StatusCode, dur, cause)
-		return nil, bridge.Wrap(bridge.ClassifyHTTP(resp.StatusCode, code), detail, fmt.Errorf("%s", cause))
+		return nil, bridge.Wrap(bridge.ClassifyHTTP(resp.StatusCode, code), detail, &graphHTTPError{statusCode: resp.StatusCode, message: cause})
 	}
 	p.logUpstream(zerolog.DebugLevel, method, resource, resp.StatusCode, dur, "")
 	return data, nil

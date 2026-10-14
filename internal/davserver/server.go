@@ -445,6 +445,14 @@ func (h *handler) handleCalDAV(w http.ResponseWriter, r *http.Request, email str
 		h.handleCalCollection(w, r, email, collID)
 		return
 	}
+	if segs[3] == "_attachments" {
+		h.handleTaskAttachment(w, r, email, collID, segs)
+		return
+	}
+	if len(segs) != 4 {
+		http.NotFound(w, r)
+		return
+	}
 	h.handleCalObject(w, r, email, collID, segs[3])
 }
 
@@ -524,6 +532,7 @@ func (h *handler) calObjects(r *http.Request, email string, coll collection, fro
 				uid = tk.ID
 			}
 			tk.UID = uid
+			tk = taskWithAttachmentURIs(r, email, coll.ID, tk)
 			out = append(out, calObj{uid: uid, id: tk.ID, data: generateTaskICalendar(tk)})
 		}
 		return out, nil
@@ -618,6 +627,39 @@ func (h *handler) reportCalendar(w http.ResponseWriter, r *http.Request, email s
 			Int("duplicate_uids", len(objs)-len(uids)).Msg("dav calendar report")
 	}
 	h.writeMultistatus(w, resps)
+}
+
+func sameTaskNote(a, b string) bool {
+	normalize := strings.NewReplacer("\r\n", "\n", "\r", "\n")
+	return normalize.Replace(a) == normalize.Replace(b)
+}
+
+func sameTaskTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Truncate(time.Second).Equal(b.Truncate(time.Second))
+}
+
+func sameTaskAnchor(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Format("2006-01-02") == b.Format("2006-01-02")
+}
+
+func matchesETag(values []string, current string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	for _, value := range values {
+		for _, tag := range strings.Split(value, ",") {
+			if tag = strings.TrimSpace(tag); tag == "*" || tag == current {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func contains(s []string, v string) bool {
@@ -720,6 +762,39 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 		}
 		for _, ex := range existing {
 			if ex.UID == tk.UID || ex.ID == tk.UID {
+				if ex.UID == "" {
+					ex.UID = ex.ID
+				}
+				current := taskWithAttachmentURIs(r, email, collID, ex)
+				if !matchesETag(r.Header.Values("If-Match"), etag(ex.ID, generateTaskICalendar(current))) {
+					w.WriteHeader(http.StatusPreconditionFailed)
+					return
+				}
+				if !taskAttachmentRefsMatch(r, email, collID, ex, tk.Attachments) {
+					http.Error(w, "task attachments are read-only; upload/removal is not supported", http.StatusNotImplemented)
+					return
+				}
+				if ex.RecurUnsupported {
+					if tk.Recur != "" {
+						http.Error(w, "native task repetition cannot be safely replaced", http.StatusUnprocessableEntity)
+						return
+					}
+					tk.RecurSet, tk.RecurUnsupported = false, true
+				}
+				tk.BodyUnchanged = sameTaskNote(tk.Body, ex.Body)
+				tk.StatusUnchanged = tk.Status == ex.Status && sameTaskTime(tk.Completed, ex.Completed)
+				// The task codec cannot edit alarms yet; do not erase a native reminder.
+				tk.Reminder = ex.Reminder
+				// Preserve the native repeat anchor if a client omits bridge metadata.
+				if tk.Recur != "" && tk.RecurStart == nil {
+					tk.RecurStart, tk.RecurTimeZone = ex.RecurStart, ex.RecurTimeZone
+					if ex.Start == nil && tk.Start != nil && ex.RecurStart != nil && tk.Start.Equal(*ex.RecurStart) {
+						tk.Start, tk.StartDateOnly = nil, false
+					}
+				}
+				if sameTaskRule(tk.Recur, taskCalendarRule(ex)) && sameTaskAnchor(tk.RecurStart, ex.RecurStart) && tk.RecurTimeZone == ex.RecurTimeZone {
+					tk.RecurSet, tk.Recur = false, ex.Recur
+				}
 				tk.ID = ex.ID
 				if err := h.call(ctx, email, func(c context.Context, p bridge.Provider) error {
 					return p.UpdateTask(c, tk)
@@ -727,10 +802,20 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 					h.upstreamErr(w, email, err)
 					return
 				}
+				tk.Attachments = ex.Attachments
+				tk = taskWithAttachmentURIs(r, email, collID, tk)
 				w.Header().Set("ETag", etag(tk.ID, generateTaskICalendar(tk)))
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
+		}
+		if len(r.Header.Values("If-Match")) > 0 {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
+		if tk.Attachments != nil && len(tk.Attachments) > 0 {
+			http.Error(w, "task attachment uploads are not supported", http.StatusNotImplemented)
+			return
 		}
 		var created bridge.Task
 		if err := h.call(ctx, email, func(c context.Context, p bridge.Provider) error {
@@ -769,16 +854,7 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 				if ex.UID == "" {
 					ex.UID = ex.ID
 				}
-				currentTag := etag(ex.ID, generateEventICalendar(ex))
-				matched := false
-				for _, value := range ifMatch {
-					for _, tag := range strings.Split(value, ",") {
-						if tag = strings.TrimSpace(tag); tag == "*" || tag == currentTag {
-							matched = true
-						}
-					}
-				}
-				if !matched {
+				if !matchesETag(ifMatch, etag(ex.ID, generateEventICalendar(ex))) {
 					w.WriteHeader(http.StatusPreconditionFailed)
 					return
 				}

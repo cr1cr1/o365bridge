@@ -127,6 +127,13 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 			ev = nil
 		}
 		if tk != nil {
+			if tk.RecurAnchorOnly && tk.Start != nil {
+				if tk.RecurStart == nil {
+					tk.RecurStart = tk.Start
+				}
+				tk.Start = nil
+				tk.StartDateOnly = false
+			}
 			tasks = append(tasks, *tk)
 			tk = nil
 		}
@@ -153,7 +160,7 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 				comp = "VEVENT"
 			case "VTODO":
 				flush()
-				tk = &bridge.Task{}
+				tk = &bridge.Task{FullUpdate: true, RecurSet: true, Categories: []string{}}
 				comp = "VTODO"
 			default: // VALARM etc: ignored
 				comp = strings.ToUpper(prop.Value)
@@ -178,6 +185,9 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 			}
 		case "VTODO":
 			if tk != nil {
+				if prop.Name == "RDATE" || prop.Name == "EXDATE" || prop.Name == "RECURRENCE-ID" {
+					return nil, nil, fmt.Errorf("davserver: task recurrence exceptions are not supported")
+				}
 				applyTaskProp(tk, prop)
 			}
 		}
@@ -185,6 +195,13 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 	flush()
 	if !sawCal {
 		return nil, nil, fmt.Errorf("davserver: not an iCalendar object")
+	}
+	for _, task := range tasks {
+		for _, value := range []*time.Time{task.Start, task.Due, task.Completed} {
+			if value != nil && value.IsZero() {
+				return nil, nil, fmt.Errorf("davserver: invalid task date")
+			}
+		}
 	}
 	return events, tasks, nil
 }
@@ -337,11 +354,27 @@ func applyTaskProp(tk *bridge.Task, p icalProp) {
 	case "DESCRIPTION":
 		tk.Body = unescapeText(p.Value)
 	case "DTSTART":
-		t, _ := parseDateTime(p)
-		tk.Start = &t
+		t, dateOnly := parseDateTime(p)
+		tk.Start, tk.StartDateOnly = &t, dateOnly
 	case "DUE":
-		t, _ := parseDateTime(p)
-		tk.Due = &t
+		t, dateOnly := parseDateTime(p)
+		tk.Due, tk.DueDateOnly = &t, dateOnly
+	case "CATEGORIES":
+		tk.Categories = append(tk.Categories, parseCategories(p.Value)...)
+	case "ATTACH":
+		if tk.Attachments == nil {
+			tk.Attachments = []bridge.TaskAttachment{}
+		}
+		tk.Attachments = append(tk.Attachments, bridge.TaskAttachment{URI: p.Value, ContentType: p.Params["FMTTYPE"]})
+	case "X-O365BRIDGE-RECUR-START":
+		t, _ := parseDateTime(icalProp{Value: p.Value, Params: map[string]string{"VALUE": "DATE"}})
+		tk.RecurStart = &t
+	case "X-O365BRIDGE-RECUR-TZ":
+		tk.RecurTimeZone = unescapeText(p.Value)
+	case "X-O365BRIDGE-RECUR-ANCHOR-ONLY":
+		tk.RecurAnchorOnly = strings.EqualFold(p.Value, "TRUE")
+	case "X-O365BRIDGE-RECUR-UNSUPPORTED":
+		tk.RecurUnsupported = strings.EqualFold(p.Value, "TRUE")
 	case "COMPLETED":
 		t, _ := parseDateTime(p)
 		tk.Completed = &t
@@ -449,10 +482,41 @@ func generateTaskICalendar(tk bridge.Task) []byte {
 		lines = append(lines, "DESCRIPTION:"+escapeText(tk.Body))
 	}
 	if tk.Start != nil {
-		lines = append(lines, "DTSTART:"+fmtDateTime(*tk.Start, false))
+		name := "DTSTART:"
+		if tk.StartDateOnly {
+			name = "DTSTART;VALUE=DATE:"
+		}
+		lines = append(lines, name+fmtDateTime(*tk.Start, tk.StartDateOnly))
+	} else if tk.Recur != "" && tk.RecurStart != nil {
+		dateOnly := tk.Due == nil || tk.DueDateOnly
+		name := "DTSTART:"
+		if dateOnly {
+			name = "DTSTART;VALUE=DATE:"
+		}
+		lines = append(lines, name+fmtDateTime(*tk.RecurStart, dateOnly), "X-O365BRIDGE-RECUR-ANCHOR-ONLY:TRUE")
 	}
 	if tk.Due != nil {
-		lines = append(lines, "DUE:"+fmtDateTime(*tk.Due, false))
+		name := "DUE:"
+		if tk.DueDateOnly {
+			name = "DUE;VALUE=DATE:"
+		}
+		lines = append(lines, name+fmtDateTime(*tk.Due, tk.DueDateOnly))
+	}
+	if len(tk.Categories) > 0 {
+		categories := make([]string, len(tk.Categories))
+		for i, category := range tk.Categories {
+			categories[i] = escapeText(category)
+		}
+		lines = append(lines, "CATEGORIES:"+strings.Join(categories, ","))
+	}
+	for _, attachment := range tk.Attachments {
+		if attachment.URI != "" {
+			name := "ATTACH"
+			if attachment.ContentType != "" {
+				name += ";FMTTYPE=" + attachment.ContentType
+			}
+			lines = append(lines, name+":"+attachment.URI)
+		}
 	}
 	status := statusFromBridge(tk.Status)
 	if tk.Completed != nil {
@@ -467,7 +531,16 @@ func generateTaskICalendar(tk bridge.Task) []byte {
 		lines = append(lines, "PRIORITY:"+strconv.Itoa(tk.Priority))
 	}
 	if tk.Recur != "" {
-		lines = append(lines, "RRULE:"+strings.TrimPrefix(tk.Recur, "RRULE:"))
+		lines = append(lines, "RRULE:"+taskCalendarRule(tk))
+	}
+	if tk.RecurStart != nil {
+		lines = append(lines, "X-O365BRIDGE-RECUR-START:"+fmtDateTime(*tk.RecurStart, true))
+	}
+	if tk.RecurTimeZone != "" {
+		lines = append(lines, "X-O365BRIDGE-RECUR-TZ:"+escapeText(tk.RecurTimeZone))
+	}
+	if tk.RecurUnsupported {
+		lines = append(lines, "X-O365BRIDGE-RECUR-UNSUPPORTED:TRUE")
 	}
 	lines = append(lines, "END:VTODO", "END:VCALENDAR")
 	return joinCRLF(lines)

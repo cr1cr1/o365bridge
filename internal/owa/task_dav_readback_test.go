@@ -95,7 +95,25 @@ func TestCalDAVNativeTaskReadbackAfterCreationAndRestart(t *testing.T) {
 					t.Errorf("task update used non-task item: %+v", update)
 				}
 				for key, value := range item {
-					if key != "__type" {
+					if key == "ExtendedProperty" {
+						// Native named-property updates merge the selected field;
+						// they do not replace every other extended property.
+						properties := arr(stored[createdID], "ExtendedProperty")
+						for _, property := range arr(item, "ExtendedProperty") {
+							name := str(property, "ExtendedFieldURI", "PropertyName")
+							replaced := false
+							for index, old := range properties {
+								if str(old, "ExtendedFieldURI", "PropertyName") == name && str(old, "ExtendedFieldURI", "DistinguishedPropertySetId") == str(property, "ExtendedFieldURI", "DistinguishedPropertySetId") {
+									properties[index], replaced = property, true
+									break
+								}
+							}
+							if !replaced {
+								properties = append(properties, property)
+							}
+						}
+						stored[createdID][key] = properties
+					} else if key != "__type" {
 						stored[createdID][key] = value
 					}
 				}

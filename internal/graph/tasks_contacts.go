@@ -37,17 +37,17 @@ type graphTask struct {
 		Content     string `json:"content"`
 		ContentType string `json:"contentType"`
 	} `json:"body,omitempty"`
-	Status            string      `json:"status,omitempty"`
-	Importance        string      `json:"importance,omitempty"`
-	IsReminderOn      bool        `json:"isReminderOn,omitempty"`
-	ReminderDateTime  *dateTimeTZ `json:"reminderDateTime,omitempty"`
-	DueDateTime       *dateTimeTZ `json:"dueDateTime,omitempty"`
-	StartDateTime     *dateTimeTZ `json:"startDateTime,omitempty"`
-	CompletedDateTime *dateTimeTZ `json:"completedDateTime,omitempty"`
-	Extensions        []struct {
-		ExtensionName string `json:"extensionName"`
-		UID           string `json:"uid"`
-	} `json:"extensions,omitempty"`
+	Status            string               `json:"status,omitempty"`
+	Importance        string               `json:"importance,omitempty"`
+	IsReminderOn      bool                 `json:"isReminderOn,omitempty"`
+	ReminderDateTime  *dateTimeTZ          `json:"reminderDateTime,omitempty"`
+	DueDateTime       *dateTimeTZ          `json:"dueDateTime,omitempty"`
+	StartDateTime     *dateTimeTZ          `json:"startDateTime,omitempty"`
+	CompletedDateTime *dateTimeTZ          `json:"completedDateTime,omitempty"`
+	Categories        []string             `json:"categories"`
+	HasAttachments    bool                 `json:"hasAttachments"`
+	Recurrence        *graphTaskRecurrence `json:"recurrence"`
+	Extensions        []graphTaskExtension `json:"extensions,omitempty"`
 }
 
 func taskStatusToGraph(s string) string {
@@ -94,22 +94,32 @@ func priorityFromGraph(imp string) int {
 
 func (g graphTask) toTask(listID string) bridge.Task {
 	t := bridge.Task{ID: g.ID, UID: g.ID, ListID: listID, Title: g.Title, Status: taskStatusFromGraph(g.Status), Priority: priorityFromGraph(g.Importance)}
+	var startDateOnly, dueDateOnly *bool
 	for _, extension := range g.Extensions {
-		if extension.ExtensionName == taskUIDExtensionName && extension.UID != "" {
-			t.UID = extension.UID
+		if extension.ExtensionName == taskUIDExtensionName {
+			if extension.UID != "" {
+				t.UID = extension.UID
+			}
+			startDateOnly, dueDateOnly = extension.StartDateOnly, extension.DueDateOnly
 			break
 		}
 	}
+	t.Categories = g.Categories
 	if g.Body != nil {
-		t.Body = g.Body.Content
+		t.Body = bridge.PlainTextBody(g.Body.Content, g.Body.ContentType)
+	}
+	if g.Recurrence != nil {
+		t.Recur, t.RecurStart, t.RecurTimeZone, t.RecurUnsupported = g.Recurrence.taskRepeat()
 	}
 	if g.DueDateTime != nil {
 		v := fromGraphDT(*g.DueDateTime)
 		t.Due = &v
+		t.DueDateOnly = graphTaskDateOnly(g.DueDateTime.DateTime, dueDateOnly)
 	}
 	if g.StartDateTime != nil {
 		v := fromGraphDT(*g.StartDateTime)
 		t.Start = &v
+		t.StartDateOnly = graphTaskDateOnly(g.StartDateTime.DateTime, startDateOnly)
 	}
 	if g.CompletedDateTime != nil {
 		v := fromGraphDT(*g.CompletedDateTime)
@@ -123,36 +133,63 @@ func (g graphTask) toTask(listID string) bridge.Task {
 	return t
 }
 
-func taskJSON(t bridge.Task) map[string]any {
-	m := map[string]any{
-		"title":      t.Title,
-		"status":     taskStatusToGraph(t.Status),
-		"importance": importanceToGraph(t.Priority),
+func taskJSON(t bridge.Task, update bool) (map[string]any, error) {
+	m := map[string]any{}
+	authoritative := !update || t.FullUpdate
+	if authoritative || t.Title != "" {
+		m["title"] = t.Title
 	}
-	if t.Body != "" {
-		m["body"] = map[string]any{"content": t.Body, "contentType": "text"}
+	if authoritative || t.Status != "" {
+		m["status"] = taskStatusToGraph(t.Status)
+	}
+	if authoritative || t.Priority != 0 {
+		m["importance"] = importanceToGraph(t.Priority)
+	}
+	clear := update && t.FullUpdate
+	if (!update || !t.BodyUnchanged) && (t.Body != "" || clear) {
+		m["body"] = map[string]any{"content": bridge.TaskNoteHTML(t.Body), "contentType": "html"}
+	}
+	if t.Categories != nil {
+		m["categories"] = t.Categories
+	}
+	if clear {
+		for _, field := range []string{"dueDateTime", "startDateTime", "completedDateTime", "reminderDateTime"} {
+			m[field] = nil
+		}
+		m["isReminderOn"] = false
 	}
 	if t.Due != nil {
-		d := toGraphDT(*t.Due, "UTC")
-		m["dueDateTime"] = d
+		m["dueDateTime"] = toGraphDT(*t.Due, "UTC")
 	}
 	if t.Start != nil {
-		d := toGraphDT(*t.Start, "UTC")
-		m["startDateTime"] = d
+		m["startDateTime"] = toGraphDT(*t.Start, "UTC")
 	}
 	if t.Completed != nil {
-		d := toGraphDT(*t.Completed, "UTC")
-		m["completedDateTime"] = d
+		m["completedDateTime"] = toGraphDT(*t.Completed, "UTC")
 		m["status"] = "completed"
 	}
 	if t.Reminder != nil {
-		d := toGraphDT(*t.Reminder, "UTC")
-		m["reminderDateTime"] = d
+		m["reminderDateTime"] = toGraphDT(*t.Reminder, "UTC")
 		m["isReminderOn"] = true
 	}
-	// Recur (RRULE string) vs Graph structured recurrence: omitted rather
-	// than risk corrupting the task; see calendar.go note.
-	return m
+	if t.RecurSet || (!update && t.Recur != "") {
+		if t.Recur == "" {
+			if update {
+				m["recurrence"] = nil
+			}
+		} else {
+			recurrence, err := taskRecurrenceJSON(t)
+			if err != nil {
+				return nil, err
+			}
+			m["recurrence"] = recurrence
+		}
+	}
+	if update && t.StatusUnchanged {
+		delete(m, "status")
+		delete(m, "completedDateTime")
+	}
+	return m, nil
 }
 
 func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task, error) {
@@ -163,19 +200,35 @@ func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task,
 	}
 	out := make([]bridge.Task, 0, len(items))
 	for _, it := range items {
-		out = append(out, it.toTask(listID))
+		task := it.toTask(listID)
+		if it.HasAttachments {
+			attachments, err := p.listTaskAttachments(ctx, listID, it.ID)
+			if err != nil {
+				return nil, err
+			}
+			for _, attachment := range attachments {
+				if !attachment.isFile() {
+					continue
+				}
+				if attachment.ID == "" || attachment.Size < 0 {
+					return nil, bridge.Wrap(bridge.KindOther, "graph: invalid task attachment metadata", nil)
+				}
+				task.Attachments = append(task.Attachments, bridge.TaskAttachment{ID: attachment.ID, Name: attachment.Name, ContentType: attachment.ContentType, Size: attachment.Size})
+			}
+		}
+		out = append(out, task)
 	}
 	return out, nil
 }
 
 func (p *provider) CreateTask(ctx context.Context, t bridge.Task) (bridge.Task, error) {
-	body := taskJSON(t)
-	if t.UID != "" {
-		// Persist identity with the task, not in a second fallible request.
-		body["extensions"] = []any{map[string]any{
-			"@odata.type":   "microsoft.graph.openTypeExtension",
-			"extensionName": taskUIDExtensionName, "uid": t.UID,
-		}}
+	body, err := taskJSON(t, false)
+	if err != nil {
+		return bridge.Task{}, err
+	}
+	if t.UID != "" || t.StartDateOnly || t.DueDateOnly {
+		// Identity and date fidelity are persisted atomically with task creation.
+		body["extensions"] = []any{taskMetadataJSON(t.UID, t.Start != nil && t.StartDateOnly, t.Due != nil && t.DueDateOnly)}
 	}
 	var gt graphTask
 	if err := p.doJSON(ctx, http.MethodPost, "/me/todo/lists/"+esc(t.ListID)+"/tasks", body, &gt); err != nil {
@@ -185,6 +238,7 @@ func (p *provider) CreateTask(ctx context.Context, t bridge.Task) (bridge.Task, 
 		return bridge.Task{}, bridge.Wrap(bridge.KindOther, "graph: create task response missing id", nil)
 	}
 	out := gt.toTask(t.ListID)
+	out.StartDateOnly, out.DueDateOnly = t.Start != nil && t.StartDateOnly, t.Due != nil && t.DueDateOnly
 	if t.UID != "" {
 		out.UID = t.UID // A create response need not expand extensions.
 	}
@@ -192,7 +246,27 @@ func (p *provider) CreateTask(ctx context.Context, t bridge.Task) (bridge.Task, 
 }
 
 func (p *provider) UpdateTask(ctx context.Context, t bridge.Task) error {
-	return p.doJSON(ctx, http.MethodPatch, "/me/todo/lists/"+esc(t.ListID)+"/tasks/"+esc(t.ID), taskJSON(t), nil)
+	body, err := taskJSON(t, true)
+	if err != nil {
+		return err
+	}
+	metadataMethod, metadata, err := p.taskDateMetadataChange(ctx, t)
+	if err != nil {
+		return err
+	}
+	path := "/me/todo/lists/" + esc(t.ListID) + "/tasks/" + esc(t.ID)
+	if err := p.doJSON(ctx, http.MethodPatch, path, body, nil); err != nil {
+		return err
+	}
+	if metadataMethod != "" {
+		// Graph task and extension writes are not atomic; never hide metadata failure.
+		path += "/extensions"
+		if metadataMethod == http.MethodPatch {
+			path += "/" + esc(taskUIDExtensionName)
+		}
+		return p.doJSON(ctx, metadataMethod, path, metadata, nil)
+	}
+	return nil
 }
 
 func (p *provider) DeleteTask(ctx context.Context, listID, id string) error {

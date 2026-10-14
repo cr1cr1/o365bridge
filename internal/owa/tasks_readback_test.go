@@ -52,7 +52,7 @@ func TestOWATasksHydrateSparseDiscovery(t *testing.T) {
 			foundUID = true
 		}
 	}
-	for _, field := range []string{"item:Subject", "item:Body", "item:TextBody", "item:Importance", "task:DueDate", "task:StartDate", "task:CompleteDate", "task:PercentComplete", "task:Status", "item:ReminderDueBy", "item:ReminderIsSet", "task:Recurrence"} {
+	for _, field := range []string{"item:Subject", "item:Body", "item:TextBody", "item:Importance", "item:Categories", "item:Attachments", "item:HasAttachments", "task:DueDate", "task:StartDate", "task:CompleteDate", "task:PercentComplete", "task:Status", "item:ReminderDueBy", "item:ReminderIsSet", "task:Recurrence"} {
 		if !fields[field] {
 			t.Errorf("missing task property %s", field)
 		}
@@ -173,7 +173,13 @@ func TestOWATasksNativeUIDSurvivesProviderRestart(t *testing.T) {
 		t.Fatal("Task has no native UID property")
 	}
 	ep := arr(stored, "ExtendedProperty")
-	if len(ep) != 1 || str(ep[0], "ExtendedFieldURI", "DistinguishedPropertySetId") != "PublicStrings" || str(ep[0], "ExtendedFieldURI", "PropertyName") != "O365BridgeTaskUID" || str(ep[0], "ExtendedFieldURI", "PropertyType") != "String" || str(ep[0], "Value") != "client-uid" {
+	var uidProperty any
+	for _, property := range ep {
+		if str(property, "ExtendedFieldURI", "PropertyName") == "O365BridgeTaskUID" {
+			uidProperty = property
+		}
+	}
+	if str(uidProperty, "ExtendedFieldURI", "DistinguishedPropertySetId") != "PublicStrings" || str(uidProperty, "ExtendedFieldURI", "PropertyType") != "String" || str(uidProperty, "Value") != "client-uid" {
 		t.Fatalf("UID not saved upstream: %+v", ep)
 	}
 	restarted := Factory{BaseURL: p.(*provider).base}.New("user@example.com", bridge.Session{OWAAuthHeader: "Bearer fake"})
