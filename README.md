@@ -114,6 +114,20 @@ not change account selection, passwords, or upstream Microsoft connections.
 
 Design: [optional downstream TLS](<docs/superpowers/specs/2026-10-14-downstream-tls-design.md>).
 
+## Calendar readback
+
+OWA calendar listing discovers item IDs with `FindItem`, then fetches complete
+calendar fields with batched `GetItem` requests before applying date filters.
+Discovery pages are followed beyond the first 1,000 items. Incomplete event
+readback returns an upstream error rather than silently hiding events.
+
+If a newly created event disappears after a successful CalDAV `PUT` (`201`),
+restart the bridge with the current build and refresh the client's calendar.
+The automated regression covers creation, GET, query/multiget, update, and
+deletion through the real OWA adapter against a fake HTTP server; real-tenant
+readback remains a manual check. Do not recreate events just because they are
+missing from a client's view—check Outlook on the web first to avoid duplicates.
+
 ## JMAP
 
 The bridge also serves JMAP (mail, calendars, contacts) on its own

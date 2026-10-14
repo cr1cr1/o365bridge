@@ -442,6 +442,17 @@ operation logging (auth, append/copy/move, sends, DAV mutations,
 upstream failures as warnings) is implemented in the downstream
 servers.
 
+OWA calendar readback uses paged `FindItem` ID discovery without the mail-list
+shape, followed by bounded `GetItem` batches requesting calendar fields before
+date filtering. Sparse discovery rows must not be treated as complete events;
+missing items or timestamps fail the read instead of becoming apparent deletions.
+An HTTP-backed OWA/CalDAV regression reproduces the original `PUT 201` then
+`GET 404` failure and verifies creation, query/multiget, update, and deletion
+after hydration. Tests also cover multiple response messages, incomplete
+readback, timezone/UID/attendee/recurrence fields, and discovery past 1,000 items.
+This does not change cancellation semantics, DAV resource-name identity, or
+recurring-master window expansion; real-tenant readback remains owner-run.
+
 Known fidelity limits, all explicit rather than silent:
 
 - **Graph recurrence on write:** bridge RRULE strings are not yet

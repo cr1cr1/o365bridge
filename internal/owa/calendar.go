@@ -211,20 +211,86 @@ func eventToOWA(ev bridge.Event) map[string]any {
 }
 
 func (p *provider) ListEvents(ctx context.Context, calendarID string, from, to time.Time) ([]bridge.Event, error) {
-	items, _, err := findItems(ctx, p, orDefault(calendarID, "calendar"), 0, 1000, nil)
-	if err != nil {
-		return nil, err
+	// FindItem returns discovery rows, not the complete event needed by DAV/JMAP.
+	var properties []any
+	for _, field := range []string{
+		"item:Subject", "item:Body", "item:TextBody", "item:ReminderIsSet", "item:ReminderMinutesBeforeStart",
+		"calendar:Start", "calendar:End", "calendar:UID", "calendar:IsAllDayEvent", "calendar:EnhancedLocation",
+		"calendar:Organizer", "calendar:RequiredAttendees", "calendar:OptionalAttendees", "calendar:Recurrence",
+		"calendar:StartTimeZone", "calendar:EndTimeZone",
+	} {
+		properties = append(properties, propURI(field))
 	}
+	shape := map[string]any{"__type": "ItemResponseShape:#Exchange", "BaseShape": "Default", "AdditionalProperties": properties}
 	var out []bridge.Event
-	for _, it := range items {
-		ev := eventFromItem(it, calendarID)
-		if !from.IsZero() && ev.End.Before(from) {
-			continue
+	for offset := 0; ; {
+		req := findItemReq(orDefault(calendarID, "calendar"), offset, 1000, nil)
+		delete(asMap(req["Body"]), "ShapeName")
+		res, err := p.call(ctx, "FindItem", req)
+		if err != nil {
+			return nil, err
 		}
-		if !to.IsZero() && !ev.Start.IsZero() && ev.Start.After(to) {
-			continue
+		if asMap(dig(res, "RootFolder")) == nil {
+			return nil, fmt.Errorf("owa: ListEvents: missing discovery folder in response")
 		}
-		out = append(out, ev)
+		rows := arr(res, "RootFolder", "Items")
+		total := int(num(res, "RootFolder", "TotalItemsInView"))
+		if len(rows) == 0 {
+			if offset < total {
+				return nil, fmt.Errorf("owa: ListEvents: incomplete discovery page")
+			}
+			break
+		}
+		for start := 0; start < len(rows); start += 100 {
+			var ids []string
+			pending := map[string]bool{}
+			for _, row := range rows[start:min(start+100, len(rows))] {
+				id := str(row, "ItemId", "Id")
+				if id == "" || pending[id] {
+					return nil, fmt.Errorf("owa: ListEvents: missing or duplicate discovery id")
+				}
+				ids = append(ids, id)
+				pending[id] = true
+			}
+			full, err := p.call(ctx, "GetItem", getItemReq(ids, shape))
+			if err != nil {
+				return nil, err
+			}
+			for _, message := range arr(full, "ResponseMessages", "Items") {
+				code := str(message, "ResponseCode")
+				if str(message, "ResponseClass") == "Error" || (code != "" && code != "NoError") {
+					return nil, fmt.Errorf("owa: ListEvents: %s: %s", code, str(message, "MessageText"))
+				}
+			}
+			for _, item := range allItems(full) {
+				ev := eventFromItem(item, calendarID)
+				if !pending[ev.ID] || ev.Start.IsZero() || ev.End.IsZero() {
+					return nil, fmt.Errorf("owa: ListEvents: incomplete calendar item readback")
+				}
+				delete(pending, ev.ID)
+				if !from.IsZero() && ev.End.Before(from) {
+					continue
+				}
+				if !to.IsZero() && ev.Start.After(to) {
+					continue
+				}
+				out = append(out, ev)
+			}
+			if len(pending) != 0 {
+				return nil, fmt.Errorf("owa: ListEvents: missing calendar items in readback")
+			}
+		}
+		next := int(num(res, "RootFolder", "IndexedPagingOffset"))
+		if next == 0 {
+			next = offset + len(rows)
+		}
+		if next <= offset {
+			return nil, fmt.Errorf("owa: ListEvents: discovery paging made no progress")
+		}
+		if boolean(res, "RootFolder", "IncludesLastItemInRange") || (total > 0 && next >= total) || (total == 0 && len(rows) < 1000) {
+			break
+		}
+		offset = next
 	}
 	return out, nil
 }
