@@ -24,7 +24,7 @@ type Factory struct {
 	BaseURL string
 	HTTP    *http.Client
 	// Logger receives one debug line per upstream Graph call
-	// (method, resource, status, duration_ms) and a warning on
+	// (method, resource, status, duration) and a warning on
 	// failure. Nil disables logging.
 	Logger *zerolog.Logger
 }
@@ -112,12 +112,12 @@ func (p *provider) doBytes(ctx context.Context, method, resource string, payload
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		p.logUpstream(zerolog.WarnLevel, method, resource, 0, time.Since(start).Milliseconds(), err.Error())
+		p.logUpstream(zerolog.WarnLevel, method, resource, 0, time.Since(start), err.Error())
 		return nil, bridge.Wrap(bridge.KindTransient, "graph: network error", err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
-	dur := time.Since(start).Milliseconds()
+	dur := time.Since(start)
 	if err != nil {
 		p.logUpstream(zerolog.WarnLevel, method, resource, resp.StatusCode, dur, "read response: "+err.Error())
 		return nil, bridge.Wrap(bridge.KindTransient, "graph: read response", err)
@@ -147,11 +147,11 @@ func (p *provider) doBytes(ctx context.Context, method, resource string, payload
 // method, resource and status per account; failures as warnings.
 // Never the token, headers or bodies. The resource may carry user
 // query terms; that is the point of the log line.
-func (p *provider) logUpstream(level zerolog.Level, method, resource string, status int, durMS int64, errMsg string) {
+func (p *provider) logUpstream(level zerolog.Level, method, resource string, status int, dur time.Duration, errMsg string) {
 	ev := p.log.WithLevel(level).
 		Str("channel", "graph").Str("op", "http").Str("method", method).
 		Str("resource", resource).Str("account", p.email).Int("status", status).
-		Int64("duration_ms", durMS)
+		Str("duration", dur.String())
 	if errMsg != "" {
 		ev.Str("error", errMsg).Msg("graph upstream request failed")
 		return

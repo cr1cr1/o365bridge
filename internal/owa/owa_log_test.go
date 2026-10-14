@@ -59,7 +59,7 @@ func TestOWAUpstreamRequestLoggedWithDuration(t *testing.T) {
 	for _, want := range []string{
 		`"level":"debug"`, `"channel":"owa"`, `"op":"http"`,
 		`"method":"POST"`, `"action":"FindFolder"`,
-		`"account":"user@example.com"`, `"status":200`, `"duration_ms":`,
+		`"account":"user@example.com"`, `"status":200`, `"duration":"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("upstream log missing %s:\n%s", want, out)
@@ -80,7 +80,7 @@ func TestOWAUpstreamFailureLoggedAsWarningWithDuration(t *testing.T) {
 		t.Fatal("want error")
 	}
 	out := buf.String()
-	for _, want := range []string{`"level":"warn"`, `"duration_ms":`, "boom"} {
+	for _, want := range []string{`"level":"warn"`, `"duration":"`, "boom"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("upstream failure log missing %s:\n%s", want, out)
 		}

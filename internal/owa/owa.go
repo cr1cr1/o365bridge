@@ -22,7 +22,7 @@ type Factory struct {
 	BaseURL string
 	HTTP    *http.Client
 	// Logger receives one debug line per upstream service.svc call
-	// (method, action, status, duration_ms) and a warning on
+	// (method, action, status, duration) and a warning on
 	// failure. Nil disables logging.
 	Logger *zerolog.Logger
 }
@@ -106,13 +106,13 @@ func (p *provider) call(ctx context.Context, action string, payload any) (any, e
 	start := time.Now()
 	resp, err := p.http.Do(req)
 	if err != nil {
-		p.logUpstream(zerolog.WarnLevel, action, 0, time.Since(start).Milliseconds(), err.Error())
+		p.logUpstream(zerolog.WarnLevel, action, 0, time.Since(start), err.Error())
 		return nil, bridge.Wrap(bridge.KindTransient, "owa: "+action, err)
 	}
 	defer resp.Body.Close()
 	var raw map[string]any
 	decErr := json.NewDecoder(resp.Body).Decode(&raw)
-	dur := time.Since(start).Milliseconds()
+	dur := time.Since(start)
 	if resp.StatusCode == 440 {
 		p.logUpstream(zerolog.WarnLevel, action, resp.StatusCode, dur, "HTTP 440 login expired")
 		return nil, bridge.Wrap(bridge.KindAuth, fmt.Sprintf("owa: %s: HTTP 440 login expired", action), nil)
@@ -148,11 +148,11 @@ func (p *provider) call(ctx context.Context, action string, payload any) (any, e
 // logUpstream emits one line per upstream service.svc round trip:
 // duration, action and status per account; failures as warnings.
 // Never the credentials, cookies or payload bodies.
-func (p *provider) logUpstream(level zerolog.Level, action string, status int, durMS int64, errMsg string) {
+func (p *provider) logUpstream(level zerolog.Level, action string, status int, dur time.Duration, errMsg string) {
 	ev := p.log.WithLevel(level).
 		Str("channel", "owa").Str("op", "http").Str("method", http.MethodPost).
 		Str("action", action).Str("account", p.email).Int("status", status).
-		Int64("duration_ms", durMS)
+		Str("duration", dur.String())
 	if errMsg != "" {
 		ev.Str("error", errMsg).Msg("owa upstream request failed")
 		return

@@ -56,7 +56,7 @@ func TestGraphUpstreamRequestLoggedWithDuration(t *testing.T) {
 	for _, want := range []string{
 		`"level":"debug"`, `"channel":"graph"`, `"op":"http"`,
 		`"method":"GET"`, `"account":"user@example.com"`,
-		`"status":200`, `"duration_ms":`,
+		`"status":200`, `"duration":"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("upstream log missing %s:\n%s", want, out)
@@ -82,7 +82,7 @@ func TestGraphUpstreamFailureLoggedAsWarningWithDuration(t *testing.T) {
 		t.Fatal("want error")
 	}
 	out := buf.String()
-	for _, want := range []string{`"level":"warn"`, `"status":502`, `"duration_ms":`} {
+	for _, want := range []string{`"level":"warn"`, `"status":502`, `"duration":"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("upstream failure log missing %s:\n%s", want, out)
 		}
