@@ -126,8 +126,11 @@ func etag(id string, content []byte) string {
 	return `"` + key + "-" + hex.EncodeToString(sum[:8]) + `"`
 }
 
-func (h *handler) upstreamErr(w http.ResponseWriter, err error) {
-	h.logger.Debug().Err(err).Msg("dav upstream error")
+// upstreamErr reports an upstream failure to the client AND
+// leaves a warning in the bridge log, per account (these used to
+// be debug-only and invisible at the default level).
+func (h *handler) upstreamErr(w http.ResponseWriter, email string, err error) {
+	h.logger.Warn().Err(err).Str("protocol", "dav").Str("account", email).Msg("dav upstream error")
 	http.Error(w, "upstream error", http.StatusBadGateway)
 }
 
@@ -288,12 +291,37 @@ func uidFromHref(href string) string {
 
 // --- main handler ---
 
+// statusRecorder captures the response status for operation logs.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rec := &statusRecorder{ResponseWriter: w, status: 200}
+	w = rec
+	defer func() {
+		// Mutating DAV operations are logged per account at info;
+		// reads stay at debug via the call sites that need them.
+		if (r.Method == "PUT" || r.Method == "DELETE") && rec.status < 400 {
+			user, _, _ := r.BasicAuth()
+			h.logger.Info().Str("protocol", "dav").Str("op", strings.ToLower(r.Method)).
+				Str("account", bridge.NormalizeEmail(user)).Str("path", r.URL.Path).
+				Int("status", rec.status).Msg("dav operation")
+		}
+	}()
 	w.Header().Set("DAV", "1, 2, calendar-access, addressbook")
 	user, pass, ok := r.BasicAuth()
 	email := bridge.NormalizeEmail(user)
 	if !ok || email == "" || !strings.Contains(email, "@") ||
 		subtle.ConstantTimeCompare([]byte(pass), []byte(h.password)) != 1 {
+		h.logger.Warn().Str("protocol", "dav").Str("op", "auth").
+			Str("account", email).Str("remote", r.RemoteAddr).Msg("dav authentication failed")
 		w.Header().Set("WWW-Authenticate", `Basic realm="o365bridge"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -392,7 +420,7 @@ func (h *handler) handleCalDAV(w http.ResponseWriter, r *http.Request, email str
 		if depth(r) != "0" {
 			colls, err := h.collections(r, email)
 			if err != nil {
-				h.upstreamErr(w, err)
+				h.upstreamErr(w, email, err)
 				return
 			}
 			for _, c := range colls {
@@ -434,7 +462,7 @@ func (h *handler) getColl(r *http.Request, email, id string) (collection, bool, 
 func (h *handler) handleCalCollection(w http.ResponseWriter, r *http.Request, email, collID string) {
 	coll, ok, err := h.getColl(r, email, collID)
 	if err != nil {
-		h.upstreamErr(w, err)
+		h.upstreamErr(w, email, err)
 		return
 	}
 	if !ok {
@@ -448,7 +476,7 @@ func (h *handler) handleCalCollection(w http.ResponseWriter, r *http.Request, em
 		if depth(r) != "0" {
 			objs, err := h.calObjects(r, email, coll, wideFrom, wideTo, true)
 			if err != nil {
-				h.upstreamErr(w, err)
+				h.upstreamErr(w, email, err)
 				return
 			}
 			for _, o := range objs {
@@ -543,7 +571,7 @@ func (h *handler) reportCalendar(w http.ResponseWriter, r *http.Request, email s
 	}
 	objs, err := h.calObjects(r, email, coll, from, to, true)
 	if err != nil {
-		h.upstreamErr(w, err)
+		h.upstreamErr(w, email, err)
 		return
 	}
 	if root == "calendar-multiget" {
@@ -584,7 +612,7 @@ func (h *handler) handleCalObject(w http.ResponseWriter, r *http.Request, email,
 	case "GET", "HEAD", "PROPFIND":
 		coll, ok, err := h.getColl(r, email, collID)
 		if err != nil {
-			h.upstreamErr(w, err)
+			h.upstreamErr(w, email, err)
 			return
 		}
 		if !ok {
@@ -593,7 +621,7 @@ func (h *handler) handleCalObject(w http.ResponseWriter, r *http.Request, email,
 		}
 		objs, err := h.calObjects(r, email, coll, wideFrom, wideTo, true)
 		if err != nil {
-			h.upstreamErr(w, err)
+			h.upstreamErr(w, email, err)
 			return
 		}
 		for _, o := range objs {
@@ -645,7 +673,7 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 		tk.ListID = collID
 		existing, err := h.fetchTasks(r, email, collID)
 		if err != nil {
-			h.upstreamErr(w, err)
+			h.upstreamErr(w, email, err)
 			return
 		}
 		for _, ex := range existing {
@@ -654,7 +682,7 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 				if err := h.call(ctx, email, func(c context.Context, p bridge.Provider) error {
 					return p.UpdateTask(c, tk)
 				}); err != nil {
-					h.upstreamErr(w, err)
+					h.upstreamErr(w, email, err)
 					return
 				}
 				w.Header().Set("ETag", etag(tk.ID, generateTaskICalendar(tk)))
@@ -668,7 +696,7 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 			created, e = p.CreateTask(c, tk)
 			return e
 		}); err != nil {
-			h.upstreamErr(w, err)
+			h.upstreamErr(w, email, err)
 			return
 		}
 		if created.ID != "" {
@@ -689,7 +717,7 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 	ev.CalendarID = collID
 	existing, err := h.fetchEvents(r, email, collID, wideFrom, wideTo)
 	if err != nil {
-		h.upstreamErr(w, err)
+		h.upstreamErr(w, email, err)
 		return
 	}
 	for _, ex := range existing {
@@ -707,7 +735,7 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 				if err := h.call(ctx, email, func(c context.Context, p bridge.Provider) error {
 					return p.RespondEvent(c, collID, ex.ID, resp)
 				}); err != nil {
-					h.upstreamErr(w, err)
+					h.upstreamErr(w, email, err)
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
@@ -716,7 +744,7 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 			if err := h.call(ctx, email, func(c context.Context, p bridge.Provider) error {
 				return p.UpdateEvent(c, ev)
 			}); err != nil {
-				h.upstreamErr(w, err)
+				h.upstreamErr(w, email, err)
 				return
 			}
 			w.Header().Set("ETag", etag(ev.ID, generateEventICalendar(ev)))
@@ -730,7 +758,7 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 		created, e = p.CreateEvent(c, ev)
 		return e
 	}); err != nil {
-		h.upstreamErr(w, err)
+		h.upstreamErr(w, email, err)
 		return
 	}
 	if created.ID != "" {
@@ -773,7 +801,7 @@ func partstatChange(oldEv, newEv bridge.Event, email string) (string, bool) {
 func (h *handler) deleteCalObject(w http.ResponseWriter, r *http.Request, email, collID, uid string) {
 	coll, ok, err := h.getColl(r, email, collID)
 	if err != nil {
-		h.upstreamErr(w, err)
+		h.upstreamErr(w, email, err)
 		return
 	}
 	if !ok {
@@ -784,7 +812,7 @@ func (h *handler) deleteCalObject(w http.ResponseWriter, r *http.Request, email,
 	if coll.Tasks {
 		tasks, err := h.fetchTasks(r, email, collID)
 		if err != nil {
-			h.upstreamErr(w, err)
+			h.upstreamErr(w, email, err)
 			return
 		}
 		for _, tk := range tasks {
@@ -792,7 +820,7 @@ func (h *handler) deleteCalObject(w http.ResponseWriter, r *http.Request, email,
 				if err := h.call(ctx, email, func(c context.Context, p bridge.Provider) error {
 					return p.DeleteTask(c, collID, tk.ID)
 				}); err != nil {
-					h.upstreamErr(w, err)
+					h.upstreamErr(w, email, err)
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
@@ -804,7 +832,7 @@ func (h *handler) deleteCalObject(w http.ResponseWriter, r *http.Request, email,
 	}
 	evs, err := h.fetchEvents(r, email, collID, wideFrom, wideTo)
 	if err != nil {
-		h.upstreamErr(w, err)
+		h.upstreamErr(w, email, err)
 		return
 	}
 	for _, ev := range evs {
@@ -812,7 +840,7 @@ func (h *handler) deleteCalObject(w http.ResponseWriter, r *http.Request, email,
 			if err := h.call(ctx, email, func(c context.Context, p bridge.Provider) error {
 				return p.DeleteEvent(c, collID, ev.ID)
 			}); err != nil {
-				h.upstreamErr(w, err)
+				h.upstreamErr(w, email, err)
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -880,7 +908,7 @@ func (h *handler) handleContacts(w http.ResponseWriter, r *http.Request, email s
 		if depth(r) != "0" {
 			contacts, err := h.fetchContacts(r, email)
 			if err != nil {
-				h.upstreamErr(w, err)
+				h.upstreamErr(w, email, err)
 				return
 			}
 			for _, c := range contacts {
@@ -905,7 +933,7 @@ func (h *handler) handleContacts(w http.ResponseWriter, r *http.Request, email s
 		}
 		contacts, err := h.fetchContacts(r, email)
 		if err != nil {
-			h.upstreamErr(w, err)
+			h.upstreamErr(w, email, err)
 			return
 		}
 		if rep.XMLName.Local == "addressbook-multiget" {
@@ -945,7 +973,7 @@ func (h *handler) handleContactObject(w http.ResponseWriter, r *http.Request, em
 	case "GET", "HEAD", "PROPFIND":
 		contacts, err := h.fetchContacts(r, email)
 		if err != nil {
-			h.upstreamErr(w, err)
+			h.upstreamErr(w, email, err)
 			return
 		}
 		for _, c := range contacts {
@@ -989,7 +1017,7 @@ func (h *handler) handleContactObject(w http.ResponseWriter, r *http.Request, em
 		c.BookID = contactsBookID
 		contacts, err := h.fetchContacts(r, email)
 		if err != nil {
-			h.upstreamErr(w, err)
+			h.upstreamErr(w, email, err)
 			return
 		}
 		for _, ex := range contacts {
@@ -998,7 +1026,7 @@ func (h *handler) handleContactObject(w http.ResponseWriter, r *http.Request, em
 				if err := h.call(ctx, email, func(ctx2 context.Context, p bridge.Provider) error {
 					return p.UpdateContact(ctx2, c)
 				}); err != nil {
-					h.upstreamErr(w, err)
+					h.upstreamErr(w, email, err)
 					return
 				}
 				w.Header().Set("ETag", etag(c.ID, generateVCard(c)))
@@ -1012,7 +1040,7 @@ func (h *handler) handleContactObject(w http.ResponseWriter, r *http.Request, em
 			created, e = p.CreateContact(ctx2, c)
 			return e
 		}); err != nil {
-			h.upstreamErr(w, err)
+			h.upstreamErr(w, email, err)
 			return
 		}
 		if created.ID != "" {
@@ -1023,7 +1051,7 @@ func (h *handler) handleContactObject(w http.ResponseWriter, r *http.Request, em
 	case "DELETE":
 		contacts, err := h.fetchContacts(r, email)
 		if err != nil {
-			h.upstreamErr(w, err)
+			h.upstreamErr(w, email, err)
 			return
 		}
 		for _, c := range contacts {
@@ -1031,7 +1059,7 @@ func (h *handler) handleContactObject(w http.ResponseWriter, r *http.Request, em
 				if err := h.call(ctx, email, func(ctx2 context.Context, p bridge.Provider) error {
 					return p.DeleteContact(ctx2, contactsBookID, c.ID)
 				}); err != nil {
-					h.upstreamErr(w, err)
+					h.upstreamErr(w, email, err)
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)

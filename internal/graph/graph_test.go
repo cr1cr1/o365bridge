@@ -474,6 +474,48 @@ func TestHTTPErrorClassification(t *testing.T) {
 	}
 }
 
+// Graph returns Windows zone names for Outlook-created events:
+// they must be interpreted in that zone (not silently as UTC) and
+// surfaced downstream as IANA. On write, an IANA zone must go out
+// as its Windows name with wall-clock times.
+func TestEventWindowsTimeZoneConversion(t *testing.T) {
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		if r.Method == "GET" && strings.Contains(r.URL.Path, "calendarview") {
+			jsonOut(w, 200, `{"value":[{"id":"ev9","iCalUId":"u9","subject":"Zoned","start":{"dateTime":"2026-10-14T11:44:00","timeZone":"E. Europe Standard Time"},"end":{"dateTime":"2026-10-14T12:44:00","timeZone":"E. Europe Standard Time"}}]}`)
+			return
+		}
+		if r.Method == "POST" && strings.Contains(r.URL.Path, "/events") {
+			jsonOut(w, 201, `{"id":"ev1","iCalUId":"uid1","subject":"New","start":{"dateTime":"2026-10-14T11:44:00","timeZone":"E. Europe Standard Time"},"end":{"dateTime":"2026-10-14T12:44:00","timeZone":"E. Europe Standard Time"}}`)
+			return
+		}
+		jsonOut(w, 200, `{"value":[]}`)
+	})
+	p := f.provider()
+	ctx := context.Background()
+
+	evs, err := p.ListEvents(ctx, "cal1", time.Time{}, time.Time{})
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("events %v %v", evs, err)
+	}
+	if evs[0].TimeZone != "Europe/Bucharest" {
+		t.Fatalf("TimeZone = %q, want Europe/Bucharest", evs[0].TimeZone)
+	}
+	if want := time.Date(2026, 10, 14, 8, 44, 0, 0, time.UTC); !evs[0].Start.Equal(want) {
+		t.Fatalf("Start = %v, want %v (11:44 EEST)", evs[0].Start, want)
+	}
+
+	loc, _ := time.LoadLocation("Europe/Bucharest")
+	start := time.Date(2026, 10, 14, 11, 44, 0, 0, loc)
+	if _, err := p.CreateEvent(ctx, bridge.Event{CalendarID: "cal1", Summary: "New", Start: start, End: start.Add(time.Hour), TimeZone: "Europe/Bucharest"}); err != nil {
+		t.Fatal(err)
+	}
+	b := bodyJSON(t, f.last().Body)
+	s, _ := b["start"].(map[string]any)
+	if s["timeZone"] != "E. Europe Standard Time" || !strings.HasPrefix(s["dateTime"].(string), "2026-10-14T11:44:00") {
+		t.Fatalf("sent start = %v, want wall time with Windows zone", s)
+	}
+}
+
 func TestEventsCreateListRespondFreeBusy(t *testing.T) {
 	f := newFake(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
 		switch {

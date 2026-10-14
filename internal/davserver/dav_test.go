@@ -1,7 +1,9 @@
 package davserver
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,6 +43,7 @@ type fakeProvider struct {
 	contacts map[string]bridge.Contact // by ID
 	responds []respondCall
 	seq      int
+	listErr  error
 }
 
 func newFake() *fakeProvider {
@@ -49,6 +52,9 @@ func newFake() *fakeProvider {
 
 func (p *fakeProvider) Ping(context.Context) error { return nil }
 func (p *fakeProvider) ListCalendars(context.Context) ([]bridge.Calendar, error) {
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
 	return []bridge.Calendar{{ID: "cal1", Name: "Calendar"}}, nil
 }
 func (p *fakeProvider) ListTaskLists(context.Context) ([]bridge.Calendar, error) {
@@ -171,13 +177,37 @@ const (
 
 func newHandler(t *testing.T, p *fakeProvider) http.Handler {
 	t.Helper()
+	return newHandlerWithLogger(t, p, zerolog.Nop())
+}
+
+func newHandlerWithLogger(t *testing.T, p *fakeProvider, logger zerolog.Logger) http.Handler {
+	t.Helper()
 	reg, err := bridge.NewRegistry(bridge.Config{
 		StateDir: t.TempDir(), Login: fakeLogin{}, Factory: fakeFactory{p},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(reg, pw, zerolog.Nop())
+	return New(reg, pw, logger)
+}
+
+// Upstream failures must be warnings in the bridge log, per
+// account (they used to be debug-only and invisible).
+func TestDAVUpstreamErrorLoggedPerAccount(t *testing.T) {
+	var buf bytes.Buffer
+	fake := newFake()
+	fake.listErr = errors.New("upstream exploded")
+	h := newHandlerWithLogger(t, fake, zerolog.New(&buf))
+	rr := req(t, h, "PROPFIND", "/caldav/"+acct+"/", "", true)
+	if rr.Code != 502 {
+		t.Fatalf("code = %d, want 502", rr.Code)
+	}
+	out := buf.String()
+	for _, want := range []string{`"level":"warn"`, `"protocol":"dav"`, `"account":"` + acct + `"`, "upstream exploded"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %s: %s", want, out)
+		}
+	}
 }
 
 func req(t *testing.T, h http.Handler, method, path, body string, auth bool) *httptest.ResponseRecorder {

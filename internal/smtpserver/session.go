@@ -89,6 +89,20 @@ func (s *Server) authenticate(sess *session, user, pass string) bool {
 	return true
 }
 
+// logAuth records an SMTP auth attempt per account at human
+// levels: success is info, failure is a warning (failures used to
+// be debug-only, so a client complaining about authentication left
+// no trace in the default log). Passwords are never logged.
+func (s *Server) logAuth(sess *session, mech, user string, ok bool) {
+	ev := s.logger.Info()
+	if !ok {
+		ev = s.logger.Warn()
+	}
+	ev.Str("protocol", "smtp").Str("op", "auth").Str("mech", mech).
+		Str("account", bridge.NormalizeEmail(user)).Str("remote", sess.remote).
+		Bool("ok", ok).Msg("smtp authentication")
+}
+
 func (s *Server) handleAuth(c net.Conn, r *bufio.Reader, sess *session, arg string) {
 	if sess.authed {
 		writeLine(c, "503 5.5.1 Already authenticated")
@@ -113,17 +127,23 @@ func (s *Server) handleAuth(c net.Conn, r *bufio.Reader, sess *session, arg stri
 			return
 		}
 		parts := strings.Split(string(dec), "\x00")
-		if len(parts) != 3 {
+		var user, pass string
+		switch len(parts) {
+		case 3: // authzid NUL username NUL password
+			user, pass = parts[1], parts[2]
+		case 2: // username NUL password (no authzid)
+			user, pass = parts[0], parts[1]
+		default:
+			s.logAuth(sess, mech, "", false)
 			writeLine(c, "501 5.5.4 Malformed authentication data")
 			return
 		}
-		// parts[0]=authzid (ignored), [1]=username, [2]=password.
 		// Password is never logged.
-		if s.authenticate(sess, parts[1], parts[2]) {
-			s.logger.Debug().Str("account", sess.email).Msg("smtp auth ok")
+		if s.authenticate(sess, user, pass) {
+			s.logAuth(sess, mech, user, true)
 			writeLine(c, "235 2.7.0 Authentication successful")
 		} else {
-			s.logger.Debug().Msg("smtp auth failed")
+			s.logAuth(sess, mech, user, false)
 			writeLine(c, "535 5.7.8 Authentication credentials invalid")
 		}
 	case "LOGIN":
@@ -154,10 +174,10 @@ func (s *Server) handleAuth(c net.Conn, r *bufio.Reader, sess *session, arg stri
 			return
 		}
 		if s.authenticate(sess, string(user), string(pass)) {
-			s.logger.Debug().Str("account", sess.email).Msg("smtp auth ok")
+			s.logAuth(sess, mech, string(user), true)
 			writeLine(c, "235 2.7.0 Authentication successful")
 		} else {
-			s.logger.Debug().Msg("smtp auth failed")
+			s.logAuth(sess, mech, string(user), false)
 			writeLine(c, "535 5.7.8 Authentication credentials invalid")
 		}
 	case "":
@@ -204,12 +224,12 @@ func (s *Server) handleData(c net.Conn, r *bufio.Reader, sess *session) {
 		return p.SendMessage(ctx, mime)
 	})
 	if err != nil {
-		s.logger.Debug().Str("account", email).Int("size", len(mime)).Msg("smtp send failed upstream")
+		s.logger.Warn().Err(err).Str("protocol", "smtp").Str("op", "send").Str("account", email).Int("size", len(mime)).Msg("smtp send failed upstream")
 		writeLine(c, "451 4.3.0 Temporary failure, please try again later")
 		return
 	}
 	id := queueID()
-	s.logger.Debug().Str("account", email).Str("queue", id).Int("size", len(mime)).Int("rcpts", len(rcpts)).Str("from", from).Msg("smtp queued")
+	s.logger.Info().Str("protocol", "smtp").Str("op", "send").Str("account", email).Str("queue", id).Int("size", len(mime)).Int("rcpts", len(rcpts)).Str("from", from).Msg("smtp message accepted")
 	writeLine(c, fmt.Sprintf(queueFmt, id))
 }
 

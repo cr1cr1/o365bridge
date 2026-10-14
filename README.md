@@ -67,6 +67,16 @@ public client with PKCE, redirect
 delegated `offline_access`, `User.Read`, `Mail.ReadWrite`,
 `Calendars.ReadWrite`, `Contacts.ReadWrite`, `Tasks.ReadWrite`.
 
+## Logs
+
+The bridge logs with zerolog at human level by default: listener
+startup, per-account authentication (success at info, failure as a
+warning), operations such as IMAP append/copy/move, SMTP sends,
+and CalDAV/CardDAV puts/deletes, plus a warning with the upstream
+error whenever an operation fails for an account. Passwords,
+tokens, headers and message bodies are never logged. Protocol
+detail is available with `--log-level debug`.
+
 ## State and resetting an account
 
 The only thing on disk is an interim session cache (discovered

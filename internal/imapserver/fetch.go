@@ -229,6 +229,8 @@ func (ss *session) cmdCopyMove(tag, rest string, lits [][]byte, uidMode bool, mo
 		}
 		ss.sel.msgs = kept
 	}
+	ss.srv.logger.Info().Str("protocol", "imap").Str("op", strings.ToLower(verb)).Str("account", ss.email).
+		Str("folder", destName).Int("count", len(ids)).Msg("imap " + strings.ToLower(verb))
 	_ = ss.printf("%s OK %s%s completed", tag, copyUID, verb)
 }
 

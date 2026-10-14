@@ -109,14 +109,23 @@ func recurrenceToRRULE(item map[string]any) string {
 }
 
 func eventFromItem(item map[string]any, calendarID string) bridge.Event {
+	// Exchange returns Windows zone IDs and naive wall times:
+	// convert the ID to IANA and interpret Start/End in that zone.
+	iana := ""
+	if tz := str(item, "StartTimeZone", "Id"); tz != "" {
+		iana = bridge.FromWindowsZone(tz)
+	} else if tz := str(item, "StartTimeZone", "Name"); tz != "" {
+		iana = bridge.FromWindowsZone(tz)
+	}
 	ev := bridge.Event{
 		ID: str(item, "ItemId", "Id"), CalendarID: calendarID,
 		UID: str(item, "UID"), Summary: str(item, "Subject"),
 		Description: bodyText(item),
-		Start:       parseTime(str(item, "Start")), End: parseTime(str(item, "End")),
+		Start:       parseZoned(str(item, "Start"), iana), End: parseZoned(str(item, "End"), iana),
 		AllDay:     boolean(item, "IsAllDayEvent"),
 		Attendees:  attendeesFrom(item),
 		Recurrence: recurrenceToRRULE(item),
+		TimeZone:   iana,
 	}
 	if loc := str(item, "Location", "DisplayName"); loc != "" {
 		ev.Location = loc
@@ -124,11 +133,6 @@ func eventFromItem(item map[string]any, calendarID string) bridge.Event {
 		ev.Location = str(item, "Location")
 	}
 	ev.Organizer = mailboxEmail(item["Organizer"])
-	if tz := str(item, "StartTimeZone", "Id"); tz != "" {
-		ev.TimeZone = tz
-	} else {
-		ev.TimeZone = str(item, "StartTimeZone", "Name")
-	}
 	if boolean(item, "ReminderIsSet") {
 		m := int(num(item, "ReminderMinutesBeforeStart"))
 		ev.ReminderMin = &m
@@ -179,7 +183,7 @@ func eventToOWA(ev bridge.Event) map[string]any {
 	item := map[string]any{
 		"__type": "CalendarItem:#Exchange", "Subject": ev.Summary,
 		"Body":          map[string]any{"__type": "BodyContentType:#Exchange", "BodyType": "HTML", "Value": ev.Description},
-		"IsAllDayEvent": ev.AllDay, "Start": fmtTime(ev.Start), "End": fmtTime(ev.End),
+		"IsAllDayEvent": ev.AllDay, "Start": fmtZoned(ev.Start, ev.TimeZone), "End": fmtZoned(ev.End, ev.TimeZone),
 		"UID": ev.UID,
 		"Location": map[string]any{"__type": "EnhancedLocation:#Exchange", "DisplayName": ev.Location,
 			"PostalAddress": map[string]any{"__type": "PersonaPostalAddress:#Exchange", "Type": "Business", "LocationSource": "None"}},
@@ -196,8 +200,9 @@ func eventToOWA(ev bridge.Event) map[string]any {
 		item["ReminderMinutesBeforeStart"] = *ev.ReminderMin
 	}
 	if ev.TimeZone != "" {
-		item["StartTimeZone"] = map[string]any{"__type": "TimeZoneDefinitionType:#Exchange", "Id": ev.TimeZone}
-		item["EndTimeZone"] = map[string]any{"__type": "TimeZoneDefinitionType:#Exchange", "Id": ev.TimeZone}
+		win := bridge.ToWindowsZone(ev.TimeZone)
+		item["StartTimeZone"] = map[string]any{"__type": "TimeZoneDefinitionType:#Exchange", "Id": win}
+		item["EndTimeZone"] = map[string]any{"__type": "TimeZoneDefinitionType:#Exchange", "Id": win}
 	}
 	if rec := rruleToRecurrence(ev.Recurrence, ev.Start); rec != nil {
 		item["Recurrence"] = rec
@@ -224,12 +229,27 @@ func (p *provider) ListEvents(ctx context.Context, calendarID string, from, to t
 	return out, nil
 }
 
+// hdrWithTZ builds the request header with a TimeZoneContext, as
+// the web client sends on calendar item creation.
+func hdrWithTZ(windowsID string) map[string]any {
+	if windowsID == "" {
+		windowsID = "UTC"
+	}
+	h := hdr()
+	h["TimeZoneContext"] = map[string]any{
+		"__type":             "TimeZoneContext:#Exchange",
+		"TimeZoneDefinition": map[string]any{"__type": "TimeZoneDefinitionType:#Exchange", "Id": windowsID},
+	}
+	return h
+}
+
 func (p *provider) CreateEvent(ctx context.Context, ev bridge.Event) (bridge.Event, error) {
 	calID := orDefault(ev.CalendarID, "calendar")
 	req := envelope("CreateItemJsonRequest:#Exchange", "CreateItemRequest:#Exchange", map[string]any{
 		"Items": []any{eventToOWA(ev)}, "SavedItemFolderId": targetFolder(calID),
 		"SendMeetingInvitations": "SendToNone",
 	})
+	req["Header"] = hdrWithTZ(bridge.ToWindowsZone(ev.TimeZone))
 	res, err := p.call(ctx, "CreateItem", req)
 	if err != nil {
 		return bridge.Event{}, err
@@ -267,12 +287,17 @@ func (p *provider) UpdateEvent(ctx context.Context, ev bridge.Event) error {
 		updates = setField(updates, "CalendarItem", "Body", calItem("Body", map[string]any{"__type": "BodyContentType:#Exchange", "BodyType": "HTML", "Value": ev.Description}))
 	}
 	if !ev.Start.IsZero() {
-		updates = setField(updates, "CalendarItem", "Start", calItem("Start", fmtTime(ev.Start)))
+		updates = setField(updates, "CalendarItem", "Start", calItem("Start", fmtZoned(ev.Start, ev.TimeZone)))
 	}
 	if !ev.End.IsZero() {
-		updates = setField(updates, "CalendarItem", "End", calItem("End", fmtTime(ev.End)))
+		updates = setField(updates, "CalendarItem", "End", calItem("End", fmtZoned(ev.End, ev.TimeZone)))
 	}
-	// Location FieldURI is EnhancedLocation per _o kFieldMap.
+	if ev.TimeZone != "" {
+		win := bridge.ToWindowsZone(ev.TimeZone)
+		updates = setField(updates, "CalendarItem", "StartTimeZone", calItem("StartTimeZone", map[string]any{"__type": "TimeZoneDefinitionType:#Exchange", "Id": win}))
+		updates = setField(updates, "CalendarItem", "EndTimeZone", calItem("EndTimeZone", map[string]any{"__type": "TimeZoneDefinitionType:#Exchange", "Id": win}))
+	}
+	// Location FieldURI is EnhancedLocation per the reference field map.
 	updates = setField(updates, "CalendarItem", "EnhancedLocation", calItem("Location", map[string]any{"__type": "EnhancedLocation:#Exchange", "DisplayName": ev.Location}))
 	updates = setField(updates, "CalendarItem", "IsAllDayEvent", calItem("IsAllDayEvent", ev.AllDay))
 	if len(updates) == 0 {

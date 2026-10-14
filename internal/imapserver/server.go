@@ -150,6 +150,7 @@ type session struct {
 	wmu     sync.Mutex
 	w       *bufio.Writer
 	email   string
+	cmd     string // current command, for log context
 	idmap   *bridge.IDMap
 	sel     *selected
 	deleted map[uint32]bool // uids flagged \Deleted by this session
@@ -173,8 +174,24 @@ func (ss *session) tagged(tag, status, text string) error {
 	return ss.printf("%s %s %s", tag, status, sanitize(text))
 }
 
+// no reports an upstream failure to the client AND leaves a
+// warning in the bridge log, per account and operation (these
+// failures used to be invisible above debug).
 func (ss *session) no(tag string, err error) error {
+	ss.srv.logger.Warn().Err(err).Str("protocol", "imap").Str("op", strings.ToLower(ss.cmd)).
+		Str("account", ss.email).Msg("imap operation failed")
 	return ss.tagged(tag, "NO", err.Error())
+}
+
+// logAuth records an IMAP auth attempt per account: info on
+// success, warning on failure. Passwords are never logged.
+func (ss *session) logAuth(user string, ok bool) {
+	ev := ss.srv.logger.Info()
+	if !ok {
+		ev = ss.srv.logger.Warn()
+	}
+	ev.Str("protocol", "imap").Str("op", "auth").
+		Str("account", bridge.NormalizeEmail(user)).Bool("ok", ok).Msg("imap authentication")
 }
 
 func (ss *session) call(op func(context.Context, bridge.Provider) error) error {
@@ -186,7 +203,7 @@ func (s *Server) handle(conn net.Conn) {
 	defer func() { _ = recover() }()
 	_ = ss.printf("* OK [CAPABILITY %s] o365bridge ready", capability)
 	for {
-		line, lits, err := readCommand(ss.r)
+		line, lits, err := readCommand(ss.r, ss.w)
 		if err != nil {
 			return
 		}
@@ -200,7 +217,12 @@ func (s *Server) handle(conn net.Conn) {
 }
 
 // readCommand reads one logical IMAP command, expanding literals.
-func readCommand(r *bufio.Reader) (string, [][]byte, error) {
+// A synchronizing literal ({n} without '+') requires the server to
+// send a continuation request before the client sends the data —
+// without it, real clients (Thunderbird APPEND) wait forever while
+// the server waits for bytes: a deadlock. Non-synchronizing
+// literals ({n+}) need no continuation.
+func readCommand(r *bufio.Reader, w *bufio.Writer) (string, [][]byte, error) {
 	var full strings.Builder
 	var lits [][]byte
 	for {
@@ -216,7 +238,15 @@ func readCommand(r *bufio.Reader) (string, [][]byte, error) {
 			}
 		}
 		trimmed := strings.TrimRight(seg, "\r\n")
-		if idx, n, ok := literalSuffix(trimmed); ok {
+		if idx, n, sync, ok := literalSuffix(trimmed); ok {
+			if sync {
+				if _, err := w.WriteString("+ Ready for literal data\r\n"); err != nil {
+					return "", nil, err
+				}
+				if err := w.Flush(); err != nil {
+					return "", nil, err
+				}
+			}
 			lit := make([]byte, n)
 			if _, err := io.ReadFull(r, lit); err != nil {
 				return "", nil, err
@@ -226,8 +256,13 @@ func readCommand(r *bufio.Reader) (string, [][]byte, error) {
 			full.WriteByte(0)
 			full.WriteString(strconv.Itoa(len(lits) - 1))
 			full.WriteByte(0)
-			// continue reading the remainder of the logical line
-			if err == io.EOF {
+			// The literal is the last argument of the only
+			// literal-taking command we support (APPEND): the
+			// command is complete. Only read a remainder if the
+			// client already pipelined one (e.g. a trailing CRLF);
+			// otherwise we would block waiting for bytes a real
+			// client never sends.
+			if err == io.EOF || r.Buffered() == 0 {
 				break
 			}
 			continue
@@ -238,29 +273,33 @@ func readCommand(r *bufio.Reader) (string, [][]byte, error) {
 	return full.String(), lits, nil
 }
 
-func literalSuffix(s string) (idx, n int, ok bool) {
+// literalSuffix parses a trailing {n} / {n+} literal marker;
+// sync reports whether it is a synchronizing literal ({n}, which
+// requires a continuation request).
+func literalSuffix(s string) (idx, n int, sync bool, ok bool) {
 	if !strings.HasSuffix(s, "}") {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	i := strings.LastIndex(s, "{")
 	if i < 0 {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	inner := s[i+1 : len(s)-1]
+	sync = !strings.HasSuffix(inner, "+")
 	inner = strings.TrimSuffix(inner, "+")
 	if inner == "" {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	for _, c := range inner {
 		if c < '0' || c > '9' {
-			return 0, 0, false
+			return 0, 0, false, false
 		}
 	}
 	v, err := strconv.Atoi(inner)
 	if err != nil {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
-	return i, v, true
+	return i, v, sync, true
 }
 
 // dispatch returns false when the connection should close.
@@ -279,6 +318,7 @@ func (ss *session) dispatch(line string, lits [][]byte) bool {
 		uidMode = true
 		rest = r2
 	}
+	ss.cmd = cmdUpper
 	ss.srv.logger.Debug().Str("cmd", cmdUpper).Bool("auth", ss.email != "").Msg("imap command")
 
 	switch cmdUpper {
@@ -390,6 +430,7 @@ func (ss *session) cmdLogin(tag, rest string, lits [][]byte) {
 		return
 	}
 	if !ss.checkPassword(user, pass) {
+		ss.logAuth(user, false)
 		_ = ss.tagged(tag, "NO", "authentication failed")
 		return
 	}
@@ -397,6 +438,7 @@ func (ss *session) cmdLogin(tag, rest string, lits [][]byte) {
 		_ = ss.no(tag, err)
 		return
 	}
+	ss.logAuth(user, true)
 	_ = ss.printf("%s OK [CAPABILITY %s] LOGIN completed", tag, capability)
 }
 
@@ -443,6 +485,7 @@ func (ss *session) cmdAuthenticate(tag, rest string, lits [][]byte) bool {
 		user = parts[0]
 	}
 	if !ss.checkPassword(user, pass) {
+		ss.logAuth(user, false)
 		_ = ss.tagged(tag, "NO", "authentication failed")
 		return true
 	}
@@ -450,6 +493,7 @@ func (ss *session) cmdAuthenticate(tag, rest string, lits [][]byte) bool {
 		_ = ss.no(tag, err)
 		return true
 	}
+	ss.logAuth(user, true)
 	_ = ss.printf("%s OK [CAPABILITY %s] AUTHENTICATE completed", tag, capability)
 	return true
 }
@@ -874,6 +918,8 @@ func (ss *session) cmdAppend(tag, rest string, lits [][]byte) {
 		_ = ss.no(tag, err)
 		return
 	}
+	ss.srv.logger.Info().Str("protocol", "imap").Str("op", "append").Str("account", ss.email).
+		Str("folder", name).Int("size", len(raw)).Msg("imap append")
 	validity := ss.idmap.UIDValidity(folder.ID)
 	uid, uerr := ss.idmap.UID(folder.ID, newID)
 	if uerr == nil && newID != "" {

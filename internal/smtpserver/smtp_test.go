@@ -2,6 +2,7 @@ package smtpserver_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -63,13 +64,18 @@ const (
 
 func start(t *testing.T, p *fakeProvider) (addr string, cleanup func()) {
 	t.Helper()
+	return startWithLogger(t, p, zerolog.Nop())
+}
+
+func startWithLogger(t *testing.T, p *fakeProvider, logger zerolog.Logger) (addr string, cleanup func()) {
+	t.Helper()
 	reg, err := bridge.NewRegistry(bridge.Config{
 		StateDir: t.TempDir(), Login: fakeLogin{}, Factory: fakeFactory{p},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := smtpserver.New(reg, pw, zerolog.Nop())
+	srv := smtpserver.New(reg, pw, logger)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -124,6 +130,30 @@ func (cl *client) cmd(t *testing.T, format string, args ...any) string {
 		t.Fatal(err)
 	}
 	return cl.readReply(t)
+}
+
+// A failed SMTP auth must leave a warning in the bridge log with
+// the account (it used to be debug-only, i.e. invisible).
+func TestSMTPAuthFailureLoggedPerAccount(t *testing.T) {
+	var buf bytes.Buffer
+	addr, done := startWithLogger(t, &fakeProvider{}, zerolog.New(&buf))
+	defer done()
+	cl := dial(t, addr)
+	defer cl.c.Close()
+	cl.cmd(t, "EHLO client.example")
+	r := cl.cmd(t, "AUTH PLAIN %s", authPlain(acct, "wrong-password"))
+	if !strings.HasPrefix(r, "535") {
+		t.Fatalf("auth = %q, want 535", r)
+	}
+	out := buf.String()
+	for _, want := range []string{`"level":"warn"`, `"protocol":"smtp"`, `"account":"` + acct + `"`, `"op":"auth"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %s: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "wrong-password") {
+		t.Fatalf("password leaked into log: %s", out)
+	}
 }
 
 func authPlain(user, pass string) string {

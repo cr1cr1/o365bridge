@@ -65,7 +65,7 @@ func (g graphEvent) toEvent(calendarID string) bridge.Event {
 		Organizer: g.Organizer.EmailAddress.Address,
 	}
 	if g.Start.TimeZone != "" && g.Start.TimeZone != "UTC" {
-		ev.TimeZone = g.Start.TimeZone
+		ev.TimeZone = bridge.FromWindowsZone(g.Start.TimeZone)
 	}
 	for _, a := range g.Attendees {
 		status := a.Status.Response

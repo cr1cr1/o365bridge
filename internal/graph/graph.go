@@ -200,12 +200,31 @@ type emailAddressWrapper struct {
 	EmailAddress emailAddress `json:"emailAddress"`
 }
 
+// zoneLocation resolves an IANA or Windows zone name to a Go
+// location (Graph returns Windows names for Outlook-created items;
+// loading those as IANA silently fell back to UTC before).
+func zoneLocation(name string) *time.Location {
+	if name == "" {
+		return time.UTC
+	}
+	if l, err := time.LoadLocation(bridge.FromWindowsZone(name)); err == nil {
+		return l
+	}
+	if l, err := time.LoadLocation(name); err == nil {
+		return l
+	}
+	return time.UTC
+}
+
 func toGraphDT(t time.Time, tz string) dateTimeTZ {
-	loc := time.UTC
+	loc := zoneLocation(tz)
 	name := "UTC"
 	if tz != "" {
-		if l, err := time.LoadLocation(tz); err == nil {
-			loc, name = l, tz
+		// Send the Windows name: Graph accepts it for every zone,
+		// including ones whose IANA name it would reject.
+		name = bridge.ToWindowsZone(tz)
+		if name == tz && loc == time.UTC && tz != "UTC" {
+			name = "UTC"
 		}
 	}
 	return dateTimeTZ{DateTime: t.In(loc).Format("2006-01-02T15:04:05.0000000"), TimeZone: name}
@@ -215,12 +234,7 @@ func fromGraphDT(d dateTimeTZ) time.Time {
 	if d.DateTime == "" {
 		return time.Time{}
 	}
-	loc := time.UTC
-	if d.TimeZone != "" {
-		if l, err := time.LoadLocation(d.TimeZone); err == nil {
-			loc = l
-		}
-	}
+	loc := zoneLocation(d.TimeZone)
 	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.9999999", "2006-01-02T15:04:05", "2006-01-02"} {
 		if t, err := time.ParseInLocation(layout, d.DateTime, loc); err == nil {
 			return t

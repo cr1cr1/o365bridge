@@ -115,6 +115,7 @@ func (s *Server) checkPassword(pw string) bool {
 type session struct {
 	authed  bool
 	email   string // authenticated account email (normalised)
+	remote  string
 	from    string
 	hasFrom bool
 	rcpts   []string
@@ -125,7 +126,7 @@ func (sess *session) resetTxn() { sess.from, sess.hasFrom, sess.rcpts = "", fals
 
 func (s *Server) handle(c net.Conn) {
 	r := bufio.NewReader(c)
-	sess := &session{}
+	sess := &session{remote: c.RemoteAddr().String()}
 	writeLine(c, greeting)
 	for {
 		line, err := readLine(r)
@@ -151,6 +152,7 @@ func (s *Server) handle(c net.Conn) {
 			s.handleAuth(c, r, sess, arg)
 		case "MAIL":
 			if !sess.authed {
+				s.logger.Warn().Str("protocol", "smtp").Str("op", "mail").Str("remote", sess.remote).Msg("smtp MAIL before authentication")
 				writeLine(c, "503 5.5.1 Authentication required")
 				continue
 			}

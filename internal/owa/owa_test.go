@@ -345,6 +345,52 @@ func TestAppendMessageCreateItemMime(t *testing.T) {
 	}
 }
 
+// Exchange requires Windows time zone IDs: an IANA zone from the
+// client (e.g. Europe/Bucharest) must be converted, Start/End sent
+// as wall-clock times in that zone, and a TimeZoneContext supplied.
+// Regression: "A time zone with the specified ID could not be found."
+func TestCreateCalendarEventConvertsTimeZone(t *testing.T) {
+	f, p := newFake(t, func(string, map[string]any) any {
+		return itemResp(map[string]any{"ItemId": map[string]any{"Id": "ev1"}})
+	})
+	loc, err := time.LoadLocation("Europe/Bucharest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 10, 14, 11, 44, 0, 0, loc)
+	ev := bridge.Event{CalendarID: "calendar", Summary: "Tz", Start: start, End: start.Add(time.Hour), TimeZone: "Europe/Bucharest"}
+	if _, err := p.CreateEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(f.last("CreateItem").Body)
+	for _, want := range []string{`"Id":"E. Europe Standard Time"`, `"Start":"2026-10-14T11:44:00"`, `"End":"2026-10-14T12:44:00"`, "TimeZoneContext"} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("body missing %q: %s", want, b)
+		}
+	}
+	if strings.Contains(string(b), `"Start":"2026-10-14T08:44:00`) {
+		t.Fatalf("start sent as UTC instant instead of wall time: %s", b)
+	}
+}
+
+// Reading an event back must convert the Windows zone ID to IANA
+// and interpret naive Start/End as wall times in that zone.
+func TestEventFromItemConvertsWindowsTimeZone(t *testing.T) {
+	item := map[string]any{
+		"ItemId": map[string]any{"Id": "e1"}, "Subject": "Tz",
+		"Start": "2026-10-14T11:44:00", "End": "2026-10-14T12:44:00",
+		"StartTimeZone": map[string]any{"Id": "E. Europe Standard Time"},
+	}
+	ev := eventFromItem(item, "calendar")
+	if ev.TimeZone != "Europe/Bucharest" {
+		t.Fatalf("TimeZone = %q, want Europe/Bucharest", ev.TimeZone)
+	}
+	want := time.Date(2026, 10, 14, 8, 44, 0, 0, time.UTC) // 11:44 EEST (UTC+3)
+	if !ev.Start.Equal(want) {
+		t.Fatalf("Start = %v, want instant %v", ev.Start, want)
+	}
+}
+
 func TestCreateCalendarEvent(t *testing.T) {
 	f, p := newFake(t, func(string, map[string]any) any {
 		return itemResp(map[string]any{"ItemId": map[string]any{"Id": "ev1"}, "UID": "uid-1"})

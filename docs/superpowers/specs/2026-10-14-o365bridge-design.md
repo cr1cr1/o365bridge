@@ -425,6 +425,15 @@ manager), `internal/imapserver`, `internal/smtpserver`,
 deviation from the "prefer emersion/go-*" guidance, chosen for a
 deterministic, dependency-light RFC subset), `cmd` (`ServeCmd`).
 
+Time zones are handled centrally: IANA↔Windows zone ID conversion
+lives in `internal/bridge` and is applied by both providers (OWA
+rejects IANA IDs outright; Graph returns Windows names for
+Outlook-created events). OWA event times are sent as wall-clock
+times in the event zone with a `TimeZoneContext` header. Per-account
+operation logging (auth, append/copy/move, sends, DAV mutations,
+upstream failures as warnings) is implemented in the downstream
+servers.
+
 Known fidelity limits, all explicit rather than silent:
 
 - **Graph recurrence on write:** bridge RRULE strings are not yet

@@ -2,6 +2,7 @@ package imapserver_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -384,6 +385,11 @@ const testPassword = "instance-secret"
 
 func startServer(t *testing.T) (*fakeProvider, net.Listener) {
 	t.Helper()
+	return startServerWithLogger(t, zerolog.Nop())
+}
+
+func startServerWithLogger(t *testing.T, logger zerolog.Logger) (*fakeProvider, net.Listener) {
+	t.Helper()
 	prov := newFakeProvider()
 	reg, err := bridge.NewRegistry(bridge.Config{
 		StateDir: t.TempDir(),
@@ -393,7 +399,7 @@ func startServer(t *testing.T) (*fakeProvider, net.Listener) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := imapserver.New(reg, testPassword, zerolog.Nop())
+	srv := imapserver.New(reg, testPassword, logger)
 	srv.IdlePollInterval = 50 * time.Millisecond
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -469,6 +475,75 @@ func joined(resp []string) string { return strings.Join(resp, "\n") }
 
 func sampleRaw(subject, body string) string {
 	return "From: Alice <alice@example.com>\r\nTo: user@example.com\r\nSubject: " + subject + "\r\nDate: Mon, 02 Jan 2006 15:04:05 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n"
+}
+
+// A real client using a synchronizing literal ({n} without '+')
+// waits for the server continuation before sending the literal
+// bytes. The server must send "+ ..." or APPEND deadlocks.
+func TestAppendSynchronizingLiteralWaitsForContinuation(t *testing.T) {
+	prov, ln := startServer(t)
+	c := dial(t, ln)
+	c.login("a")
+	raw := sampleRaw("Draft sync", "body")
+	if _, err := fmt.Fprintf(c.conn, "b APPEND INBOX (\\Draft) {%d}\r\n", len(raw)); err != nil {
+		t.Fatal(err)
+	}
+	cont := c.readLine()
+	if !strings.HasPrefix(cont, "+") {
+		t.Fatalf("expected continuation, got %q", cont)
+	}
+	if _, err := c.conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	resp := c.readUntil("b")
+	if !strings.Contains(joined(resp), "b OK") {
+		t.Fatalf("APPEND resp: %s", joined(resp))
+	}
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	if len(prov.appendedTo) != 1 {
+		t.Fatalf("appendedTo = %v", prov.appendedTo)
+	}
+}
+
+// Auth failures and operations must be visible in the bridge log
+// per account (a failed login used to leave no trace above debug).
+func TestIMAPAuthFailureAndAppendAreLoggedPerAccount(t *testing.T) {
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	_, ln := startServerWithLogger(t, logger)
+	c := dial(t, ln)
+	bad := c.cmd("a", "LOGIN "+testEmail+" wrong-password")
+	if !strings.Contains(joined(bad), "a NO") {
+		t.Fatalf("bad login: %s", joined(bad))
+	}
+	out := buf.String()
+	for _, want := range []string{`"level":"warn"`, `"protocol":"imap"`, `"account":"` + testEmail + `"`, `"op":"auth"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %s: %s", want, out)
+		}
+	}
+	buf.Reset()
+	c.login("b")
+	raw := sampleRaw("Logged draft", "x")
+	if _, err := fmt.Fprintf(c.conn, "c APPEND INBOX (\\Draft) {%d}\r\n", len(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if cont := c.readLine(); !strings.HasPrefix(cont, "+") {
+		t.Fatalf("continuation = %q", cont)
+	}
+	if _, err := c.conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if resp := c.readUntil("c"); !strings.Contains(joined(resp), "c OK") {
+		t.Fatalf("APPEND: %s", joined(resp))
+	}
+	out = buf.String()
+	for _, want := range []string{`"level":"info"`, `"protocol":"imap"`, `"account":"` + testEmail + `"`, `"op":"append"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %s: %s", want, out)
+		}
+	}
 }
 
 // ---------- tests ----------
