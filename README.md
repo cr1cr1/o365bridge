@@ -58,6 +58,10 @@ remains a manual check, since the tests run against fakes.
 o365bridge serve --help
 ```
 
+Help separates flags into Logging, Profiling, Listeners, Authentication,
+State and browser, and TLS groups. Grouping only changes help presentation;
+flag names, defaults, and environment variables remain unchanged.
+
 Key flags: `--interface` (default `127.0.0.1`), `--imap-port` (1143),
 `--smtp-port` (1025), `--dav-port` (1080), `--jmap-port` (18080, 0
 disables), `--password` (required, prefer `OB_PASSWORD`),

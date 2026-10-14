@@ -34,10 +34,10 @@ var CurrentLogFormat string
 
 // RootFlags holds global CLI flags.
 type RootFlags struct {
-	LogLevel          string `help:"Log level (trace,debug,info,warn,error)" enum:"trace,debug,info,warn,error" default:"info" env:"LOG_LEVEL"`
-	LogFormat         string `help:"Log format (console,json)" enum:"console,json" default:"console" env:"LOG_FORMAT"`
-	Profiling         bool   `help:"Enable pprof profiling server" default:"false"`
-	ProfilingListenOn string `help:"Listen address for pprof profiling server" default:"0.0.0.0:6060"`
+	LogLevel          string `help:"Log level (trace,debug,info,warn,error)" enum:"trace,debug,info,warn,error" default:"info" env:"LOG_LEVEL" group:"Logging:"`
+	LogFormat         string `help:"Log format (console,json)" enum:"console,json" default:"console" env:"LOG_FORMAT" group:"Logging:"`
+	Profiling         bool   `help:"Enable pprof profiling server" default:"false" group:"Profiling:"`
+	ProfilingListenOn string `help:"Listen address for pprof profiling server" default:"0.0.0.0:6060" group:"Profiling:"`
 }
 
 // CLI represents the main CLI structure.

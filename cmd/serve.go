@@ -30,21 +30,21 @@ import (
 // are flags; Kong also exposes each as an OB_<FLAG> envar. There is
 // no config file.
 type ServeCmd struct {
-	Interface     string `help:"Interface/address to bind all listeners to" default:"127.0.0.1"`
-	ImapPort      int    `help:"IMAP listen port" default:"1143"`
-	SmtpPort      int    `help:"SMTP submission listen port" default:"1025"`
-	DavPort       int    `help:"CalDAV/CardDAV HTTP listen port" default:"1080"`
-	JmapPort      int    `help:"JMAP HTTP listen port (0 disables)" default:"18080"`
-	Password      string `help:"Bridge instance password clients use with their email as username (prefer the OB_PASSWORD envar over the flag)"`
-	GraphClientID string `help:"Admin-created Azure app client ID; empty disables Graph and uses OWA directly" default:""`
-	StateDir      string `help:"Session cache directory (accounts, browser profiles, ID maps)" default:""`
-	BrowserPath   string `help:"Chromium/Chrome binary for login windows; empty = auto-discover/download" default:""`
-	TLSEnabled    bool   `help:"Encrypt downstream listeners: HTTPS and per-endpoint IMAP/SMTP TLS modes" default:"false"`
-	TLSCert       string `help:"PEM server certificate file, optionally followed by its certificate chain"`
-	TLSKey        string `help:"PEM private key matching --tls-cert"`
-	TLSMinVersion string `help:"Minimum downstream TLS version (1.2 or 1.3)" default:"1.3" enum:"1.2,1.3"`
-	ImapTLSMode   string `help:"IMAP encryption mode when TLS is enabled" default:"starttls" enum:"tls,starttls"`
-	SmtpTLSMode   string `help:"SMTP encryption mode when TLS is enabled" default:"starttls" enum:"tls,starttls"`
+	Interface     string `help:"Interface/address to bind all listeners to" default:"127.0.0.1" group:"Listeners:"`
+	ImapPort      int    `help:"IMAP listen port" default:"1143" group:"Listeners:"`
+	SmtpPort      int    `help:"SMTP submission listen port" default:"1025" group:"Listeners:"`
+	DavPort       int    `help:"CalDAV/CardDAV HTTP listen port" default:"1080" group:"Listeners:"`
+	JmapPort      int    `help:"JMAP HTTP listen port (0 disables)" default:"18080" group:"Listeners:"`
+	Password      string `help:"Bridge instance password clients use with their email as username (prefer the OB_PASSWORD envar over the flag)" group:"Authentication:"`
+	GraphClientID string `help:"Admin-created Azure app client ID; empty disables Graph and uses OWA directly" default:"" group:"Authentication:"`
+	StateDir      string `help:"Session cache directory (accounts, browser profiles, ID maps)" default:"" group:"State and browser:"`
+	BrowserPath   string `help:"Chromium/Chrome binary for login windows; empty = auto-discover/download" default:"" group:"State and browser:"`
+	TLSEnabled    bool   `help:"Encrypt downstream listeners: HTTPS and per-endpoint IMAP/SMTP TLS modes" default:"false" group:"TLS:"`
+	TLSCert       string `help:"PEM server certificate file, optionally followed by its certificate chain" group:"TLS:"`
+	TLSKey        string `help:"PEM private key matching --tls-cert" group:"TLS:"`
+	TLSMinVersion string `help:"Minimum downstream TLS version (1.2 or 1.3)" default:"1.3" enum:"1.2,1.3" group:"TLS:"`
+	ImapTLSMode   string `help:"IMAP encryption mode when TLS is enabled" default:"starttls" enum:"tls,starttls" group:"TLS:"`
+	SmtpTLSMode   string `help:"SMTP encryption mode when TLS is enabled" default:"starttls" enum:"tls,starttls" group:"TLS:"`
 }
 
 // resolveStateDir picks the per-user state directory:
