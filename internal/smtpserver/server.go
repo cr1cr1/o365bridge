@@ -115,6 +115,7 @@ func (s *Server) checkPassword(pw string) bool {
 type session struct {
 	authed  bool
 	email   string // authenticated account email (normalised)
+	hello   string // "EHLO", "HELO", or "" if neither was sent
 	remote  string
 	from    string
 	hasFrom bool
@@ -151,20 +152,29 @@ func (s *Server) handle(c net.Conn) {
 		switch cmd {
 		case "EHLO":
 			sess.resetTxn()
+			sess.hello = cmd
 			writeLine(c, "250-"+hostname+" greets "+argOr(arg, "client"))
 			writeLine(c, "250-AUTH PLAIN LOGIN")
 			writeLine(c, fmt.Sprintf("250-SIZE %d", maxSize))
 			writeLine(c, "250 8BITMIME")
 		case "HELO":
 			sess.resetTxn()
+			sess.hello = cmd
 			writeLine(c, "250 "+hostname+" greets "+argOr(arg, "client"))
 		case "AUTH":
 			s.handleAuth(c, r, sess, arg)
 		case "MAIL":
 			if !sess.authed {
 				from, _ := parsePath(arg, "FROM:")
+				// hello/auth_advertised pinpoint why a client
+				// reached MAIL unauthenticated: HELO (or no
+				// greeting) means it never saw the AUTH
+				// advertisement; EHLO means it saw AUTH yet
+				// its effective auth setting said "none".
 				s.logger.Warn().Str("protocol", "smtp").Str("op", "mail").Str("remote", sess.remote).
-					Str("from", from).Msg("smtp MAIL before authentication")
+					Str("from", from).Str("hello", argOr(sess.hello, "none")).
+					Bool("auth_advertised", sess.hello == "EHLO").
+					Msg("smtp MAIL before authentication")
 				// RFC 4954 §5: 530 5.7.0 is the standard
 				// "authentication required" reply — the signal
 				// an MTA uses to authenticate (prompting the

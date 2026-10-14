@@ -174,7 +174,28 @@ func TestSMTPMailBeforeAuthWarnLogged(t *testing.T) {
 		t.Fatalf("MAIL before auth = %q, want 530 5.7.0", r)
 	}
 	out := buf.String()
-	for _, want := range []string{`"level":"warn"`, `"protocol":"smtp"`, `"op":"mail"`, `"from":"user@example.com"`} {
+	for _, want := range []string{`"level":"warn"`, `"protocol":"smtp"`, `"op":"mail"`, `"from":"user@example.com"`, `"hello":"EHLO"`, `"auth_advertised":true`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %s: %s", want, out)
+		}
+	}
+}
+
+// Same warning after HELO (no AUTH is ever advertised on HELO) must
+// say so, distinguishing a client that never EHLO'd from one that
+// EHLO'd, saw AUTH, and skipped it anyway.
+func TestSMTPMailBeforeAuthAfterHeloLogged(t *testing.T) {
+	buf := &lockedBuffer{}
+	addr, done := startWithLogger(t, &fakeProvider{}, zerolog.New(buf))
+	defer done()
+	cl := dial(t, addr)
+	defer cl.c.Close()
+	cl.cmd(t, "HELO client.example")
+	if r := cl.cmd(t, "MAIL FROM:<user@example.com>"); !strings.HasPrefix(r, "530 5.7.0") {
+		t.Fatalf("MAIL before auth = %q, want 530 5.7.0", r)
+	}
+	out := buf.String()
+	for _, want := range []string{`"hello":"HELO"`, `"auth_advertised":false`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("log missing %s: %s", want, out)
 		}
