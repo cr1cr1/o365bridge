@@ -9,15 +9,15 @@
 #        go build -o bin/o365bridge .
 #        OB_PASSWORD='choose-a-bridge-password' ./bin/o365bridge serve
 #      IMAP listens on 127.0.0.1:1143, SMTP on 127.0.0.1:1025, JMAP on
-#      127.0.0.1:8080 (all configurable: --imap-port, --smtp-port, --jmap-port).
+#      127.0.0.1:18080 (all configurable: --imap-port, --smtp-port, --jmap-port).
 #   2. Replace every "you@example.com" below with your Outlook 365 address and
 #      every "bridge-password" with your OB_PASSWORD value. The username IS the
 #      account selector: the first connection opens the bridge's Chromium window
 #      for that account's Microsoft login.
 #
-# Everything here is loopback and cleartext by design — the bridge serves plain
-# protocols on 127.0.0.1 (no TLS, no STARTTLS). Keep it that way; nothing but
-# localhost should ever see these ports.
+# This active example uses the plaintext loopback defaults. Optional TLS settings
+# are below; keep the bridge on loopback unless you deliberately change its bind
+# address. It is still a single-user bridge when TLS is enabled.
 # ================================================================================
 
 [accounts.o365bridge]
@@ -31,8 +31,8 @@ email = "you@example.com"
 #
 # A bare authority is discovered through GET /.well-known/jmap; pointing at the
 # session endpoint directly works too:
-#   jmap.server = "http://127.0.0.1:8080/jmap/session"
-jmap.server = "http://127.0.0.1:8080"
+#   jmap.server = "http://127.0.0.1:18080/jmap/session"
+jmap.server = "http://127.0.0.1:18080"
 jmap.auth.basic.username = "you@example.com"
 jmap.auth.basic.password.raw = "bridge-password"
 # Prefer a password manager over a raw secret:
@@ -50,6 +50,29 @@ jmap.auth.basic.password.raw = "bridge-password"
 #smtp.sasl.plain.username = "you@example.com"
 #smtp.sasl.plain.password.raw = "bridge-password"
 
+# --- Optional TLS ---------------------------------------------------------------
+# Start the bridge with:
+#   OB_PASSWORD='bridge-password' ./bin/o365bridge serve \
+#     --tls-enabled --tls-cert cert.pem --tls-key key.pem
+# The TLS minimum defaults to 1.3; the same ports stay in use. Change (do not
+# duplicate) the active jmap.server line above to:
+#   jmap.server = "https://localhost:18080/jmap/session"
+# For a private CA, trust its certificate (not its private key) in the client:
+#   jmap.tls.cert = "/path/to/issuing-ca.pem"
+#
+# IMAP/SMTP default to STARTTLS when --tls-enabled is set. For those backends:
+#   imap.server = "imap://localhost:1143"
+#   imap.starttls = true
+#   imap.tls.cert = "/path/to/issuing-ca.pem"
+#   smtp.server = "smtp://localhost:1025"
+#   smtp.starttls = true
+#   smtp.tls.cert = "/path/to/issuing-ca.pem"
+# Alternatively, with --imap-tls-mode tls and/or --smtp-tls-mode tls use
+# imaps://localhost:1143 or smtps://localhost:1025 (without STARTTLS).
+# The server certificate must cover the DNS name or IP you use. If it covers
+# 127.0.0.1 rather than localhost, use 127.0.0.1 instead. Do not bypass trust
+# or hostname verification. Restart the bridge after replacing certificates.
+#
 # --- Notes ----------------------------------------------------------------------
 # Sent copies: leave `message.send.save-copy` unset. The bridge's upstream send
 # already files the message in Sent Items; a client-side copy would duplicate it.

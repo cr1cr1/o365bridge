@@ -538,9 +538,20 @@ func (e *Engine) serveSession(w http.ResponseWriter, r *http.Request) {
 		s.UploadURL = base + s.UploadURL
 		s.EventSourceURL = base + s.EventSourceURL
 		if s.WebSocketURL != "" {
-			s.WebSocketURL = "ws://" + host + s.WebSocketURL
-			if scheme == "https" {
-				s.WebSocketURL = "wss://" + host + strings.TrimPrefix(s.WebSocketURL, "ws://")
+			s.WebSocketURL = wsBase(base) + s.WebSocketURL
+		}
+	}
+	// A host may mount WebSocket without knowing its public address until
+	// discovery. Fill an unset RFC 8887 capability URL from this connection,
+	// preserving explicit host configuration and other capability fields.
+	if raw, ok := s.Capabilities[jmap.WebSocketURI]; ok && s.WebSocketURL != "" {
+		var capability map[string]json.RawMessage
+		if json.Unmarshal(raw, &capability) == nil && capability != nil {
+			var endpoint string
+			_ = json.Unmarshal(capability["url"], &endpoint)
+			if endpoint == "" {
+				capability["url"], _ = json.Marshal(s.WebSocketURL)
+				s.Capabilities[jmap.WebSocketURI], _ = json.Marshal(capability)
 			}
 		}
 	}

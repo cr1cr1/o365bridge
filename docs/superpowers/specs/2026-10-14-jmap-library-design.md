@@ -79,8 +79,12 @@ written so that move is a change of module path, not a rewrite.
   bridge's JMAP support keeps only a small per-account journal of
   message IDs and content hashes (see below) — never bodies, never a
   sync engine.
-- **No TLS termination** beyond what the bridge already defers; JMAP is
-  served over plain HTTP on loopback, like DAV today.
+- **TLS remains host-owned**, not a JMAP library storage or authentication
+  concern. The original bridge's plain-HTTP-only deferral is superseded by
+  the [optional downstream TLS design](<2026-10-14-downstream-tls-design.md>):
+  the host can serve HTTPS with Go's HTTP server, and discovery uses the
+  actual connection to advertise HTTPS/WSS URLs. Plain HTTP remains the
+  bridge's default when TLS is disabled.
 
 ## Anti-goals
 

@@ -417,6 +417,14 @@ account; live-account checks stay owner-run manual gates.
 
 ## Implementation status and known deviations (2026-10-14)
 
+The initial plaintext-only TLS deferral above is superseded by the
+approved [optional downstream TLS design](<2026-10-14-downstream-tls-design.md>):
+`serve --tls-enabled` uses a supplied PEM certificate/key pair, defaults to a
+TLS 1.3 minimum, serves HTTPS for DAV/JMAP, and selects implicit TLS or
+STARTTLS independently for IMAP/SMTP on the existing ports. STARTTLS requires
+encryption before authentication; TLS-disabled behavior remains plaintext.
+This does not change upstream transports or the single-user boundary.
+
 Package map: `internal/bridge` (domain types, provider contract,
 error classification, registry, session store, ID map),
 `internal/graph`, `internal/owa`, `internal/rodlogin` (Rod login

@@ -24,8 +24,8 @@ import (
 	"github.com/cr1cr1/o365bridge/internal/smtpserver"
 )
 
-// ServeCmd starts the bridge: plain IMAP/SMTP/CalDAV/CardDAV
-// listeners on loopback by default, accounts discovered dynamically
+// ServeCmd starts the bridge: IMAP/SMTP/DAV/JMAP listeners with optional
+// downstream TLS, plaintext on loopback by default, accounts discovered dynamically
 // when a mail client first presents an email address. All settings
 // are flags; Kong also exposes each as an OB_<FLAG> envar. There is
 // no config file.
@@ -39,6 +39,12 @@ type ServeCmd struct {
 	GraphClientID string `help:"Admin-created Azure app client ID; empty disables Graph and uses OWA directly" default:""`
 	StateDir      string `help:"Session cache directory (accounts, browser profiles, ID maps)" default:""`
 	BrowserPath   string `help:"Chromium/Chrome binary for login windows; empty = auto-discover/download" default:""`
+	TLSEnabled    bool   `help:"Encrypt downstream listeners: HTTPS and per-endpoint IMAP/SMTP TLS modes" default:"false"`
+	TLSCert       string `help:"PEM server certificate file, optionally followed by its certificate chain"`
+	TLSKey        string `help:"PEM private key matching --tls-cert"`
+	TLSMinVersion string `help:"Minimum downstream TLS version (1.2 or 1.3)" default:"1.3" enum:"1.2,1.3"`
+	ImapTLSMode   string `help:"IMAP encryption mode when TLS is enabled" default:"starttls" enum:"tls,starttls"`
+	SmtpTLSMode   string `help:"SMTP encryption mode when TLS is enabled" default:"starttls" enum:"tls,starttls"`
 }
 
 // resolveStateDir picks the per-user state directory:
@@ -61,6 +67,10 @@ func resolveStateDir(flag string) (string, error) {
 func (s *ServeCmd) Run(d *Deps) error {
 	if s.Password == "" {
 		return &ExitError{Code: 2, Err: fmt.Errorf("bridge instance password is required: pass --password or set OB_PASSWORD")}
+	}
+	tlsConfig, err := s.tlsConfig()
+	if err != nil {
+		return &ExitError{Code: 2, Err: err}
 	}
 	stateDir, err := resolveStateDir(s.StateDir)
 	if err != nil {
@@ -102,7 +112,22 @@ func (s *ServeCmd) Run(d *Deps) error {
 			errCh <- fmt.Errorf("listen %s on %s: %w", name, addr, err)
 			return
 		}
-		log.Info().Str("protocol", name).Str("listen", addr).Msg("listener up")
+		security := "plain"
+		if tlsConfig != nil {
+			switch name {
+			case "imap":
+				security = s.ImapTLSMode
+			case "smtp":
+				security = s.SmtpTLSMode
+			default:
+				security = "https"
+			}
+		}
+		event := log.Info().Str("protocol", name).Str("listen", addr).Str("security", security)
+		if tlsConfig != nil {
+			event.Str("tls_min_version", s.TLSMinVersion)
+		}
+		event.Msg("listener up")
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -114,6 +139,12 @@ func (s *ServeCmd) Run(d *Deps) error {
 
 	imapSrv := imapserver.New(reg, s.Password, log.Logger)
 	smtpSrv := smtpserver.New(reg, s.Password, log.Logger)
+	if tlsConfig != nil {
+		imapSrv.TLSConfig = tlsConfig.Clone()
+		imapSrv.StartTLS = s.ImapTLSMode == "starttls"
+		smtpSrv.TLSConfig = tlsConfig.Clone()
+		smtpSrv.StartTLS = s.SmtpTLSMode == "starttls"
+	}
 	davSrv := &http.Server{
 		Handler:           davserver.New(reg, s.Password, log.Logger),
 		ReadHeaderTimeout: 30 * time.Second,
@@ -128,9 +159,9 @@ func (s *ServeCmd) Run(d *Deps) error {
 
 	serve("imap", s.ImapPort, imapSrv.Serve)
 	serve("smtp", s.SmtpPort, smtpSrv.Serve)
-	serve("dav", s.DavPort, davSrv.Serve)
+	serve("dav", s.DavPort, serveHTTP(davSrv, tlsConfig))
 	if jmapSrv != nil {
-		serve("jmap", s.JmapPort, jmapSrv.Serve)
+		serve("jmap", s.JmapPort, serveHTTP(jmapSrv, tlsConfig))
 	}
 
 	if s.GraphClientID == "" {

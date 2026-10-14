@@ -5,8 +5,10 @@ standard open protocols, for tenants where IMAP/SMTP are disabled and
 Microsoft Graph is not consented.
 
 It runs on the same Linux desktop as your mail client. Downstream it
-speaks plain **IMAP** (1143), **SMTP** (1025) and **CalDAV/CardDAV**
-(1080) on loopback. Upstream it speaks **OWA** (the Outlook web app's
+speaks **IMAP** (1143), **SMTP** (1025), **CalDAV/CardDAV** (1080), and
+**JMAP** (18080) on loopback. Plaintext is the default; optional TLS
+provides HTTPS and per-endpoint implicit TLS or STARTTLS. Upstream it
+speaks **OWA** (the Outlook web app's
 internal API, which cannot be disabled without breaking webmail) and,
 when a tenant admin provides an app registration, **Microsoft Graph**.
 
@@ -26,10 +28,10 @@ exactly like a normal account:
 |------------------------|----------------------------------------|
 | Username               | your Outlook 365 email address         |
 | Password               | the bridge instance password (above)   |
-| IMAP server / port     | `127.0.0.1` / `1143`, no TLS (v1)      |
-| SMTP server / port     | `127.0.0.1` / `1025`, no TLS (v1)      |
+| IMAP server / port     | `127.0.0.1` / `1143`, plaintext by default |
+| SMTP server / port     | `127.0.0.1` / `1025`, plaintext by default |
 | CalDAV / CardDAV       | `http://127.0.0.1:1080/caldav/` and `/carddav/` |
-| JMAP                   | `http://127.0.0.1:8080/jmap/session` (discovery: `/.well-known/jmap`) |
+| JMAP                   | `http://127.0.0.1:18080/jmap/session` (discovery: `/.well-known/jmap`) |
 
 The first time a client connects with an email the bridge has never
 seen, the bridge opens its own controlled Chromium window (via
@@ -57,10 +59,56 @@ o365bridge serve --help
 ```
 
 Key flags: `--interface` (default `127.0.0.1`), `--imap-port` (1143),
-`--smtp-port` (1025), `--dav-port` (1080), `--jmap-port` (8080, 0
+`--smtp-port` (1025), `--dav-port` (1080), `--jmap-port` (18080, 0
 disables), `--password` (required, prefer `OB_PASSWORD`),
 `--graph-client-id` (empty = Graph disabled, OWA only), `--state-dir`,
 `--browser-path`. There is no config file.
+
+## Optional TLS
+
+Enable encryption on the **existing ports**, using one PEM certificate/key
+pair for all downstream endpoints:
+
+```sh
+OB_PASSWORD='choose-a-bridge-password' ./o365bridge serve \
+  --tls-enabled --tls-cert cert.pem --tls-key key.pem
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--tls-enabled` | false | HTTPS for DAV/JMAP and the chosen IMAP/SMTP TLS modes |
+| `--tls-cert` | unset | PEM certificate, optionally followed by its chain |
+| `--tls-key` | unset | Matching PEM private key |
+| `--tls-min-version` | 1.3 | Minimum version: `1.2` or `1.3` |
+| `--imap-tls-mode` | starttls | `starttls` or implicit `tls` |
+| `--smtp-tls-mode` | starttls | `starttls` or implicit `tls` |
+
+The corresponding environment variables are `OB_TLS_ENABLED`, `OB_TLS_CERT`,
+`OB_TLS_KEY`, `OB_TLS_MIN_VERSION`, `OB_IMAP_TLS_MODE`, and `OB_SMTP_TLS_MODE`.
+Invalid TLS options or certificate/key files fail before any listener opens;
+there is no fallback to plaintext. The certificate is loaded once: restart
+when replacing it. Without `--tls-enabled`, the plaintext defaults above remain.
+
+When enabled, use `https://localhost:1080/caldav/` or `/carddav/`, and
+`https://localhost:18080/jmap/session`. JMAP discovery also works directly at
+`https://localhost:18080/.well-known/jmap` and advertises HTTPS/WSS URLs.
+IMAP/SMTP each select **one** mode; the port does not change automatically:
+
+- **STARTTLS (default):** in Thunderbird select **STARTTLS**, full email username,
+  and **Normal password**. Encryption is required before authentication. SMTP
+  clients must issue EHLO again after upgrading.
+- **Implicit TLS:** set `--imap-tls-mode tls` and/or `--smtp-tls-mode tls`, and
+  select **SSL/TLS** in Thunderbird, using the same configured port.
+
+Clients must trust the certificate's issuing CA. For a private CA, install its
+certificate in the client's trust store or configure Himalaya's per-backend
+`tls.cert` option; see the [Himalaya example](<examples/himalaya/config.toml>).
+The hostname or IP used by the client must appear in the server certificate's
+subject alternative names (e.g. `localhost` and/or `127.0.0.1`). Do not disable
+certificate verification. The bridge remains a single-user service; TLS does
+not change account selection, passwords, or upstream Microsoft connections.
+
+Design: [optional downstream TLS](<docs/superpowers/specs/2026-10-14-downstream-tls-design.md>).
 
 ## JMAP
 
@@ -117,8 +165,8 @@ the bridge translates requests live and keeps no copy of your mail.
 ## Not in v1
 
 EWS and EAS, personal Microsoft accounts (outlook.com/hotmail.com),
-OneDrive/WebDAV files, JMAP, local TLS, headless/multi-user
-operation, management UI. Linux desktop is the supported target;
+OneDrive/WebDAV files, headless/multi-user operation, management UI.
+JMAP and optional local TLS have since been added. Linux desktop is the supported target;
 other OSes are secondary.
 
 ## Development
