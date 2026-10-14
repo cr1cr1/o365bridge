@@ -203,53 +203,60 @@ func TestWellKnownAndSession(t *testing.T) {
 	e, srv := newEngine(t, server.Options{BaseURL: "http://example.test", Blobs: newFakeBlobs(), Subscriptions: newFakeSubs()})
 	e.RegisterCapability("urn:example:test", map[string]any{"x": 1}, map[string]any{})
 
+	// RFC 8620 §2.2: the session resource IS /.well-known/jmap.
+	// Serve the session object directly — clients like himalaya
+	// treat discovery as non-redirectable.
 	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, _ := http.NewRequest("GET", srv.URL+"/.well-known/jmap", nil)
-	resp, err := noFollow.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	getSession := func(url string) *jmap.Session {
+		t.Helper()
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("Authorization", "Bearer good")
+		resp, err := noFollow.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			t.Fatalf("session status %d at %s: %s", resp.StatusCode, url, data)
+		}
+		var s jmap.Session
+		if err := json.Unmarshal(data, &s); err != nil {
+			t.Fatal(err)
+		}
+		return &s
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/jmap/session" {
-		t.Fatalf("well-known: %d loc=%q", resp.StatusCode, resp.Header.Get("Location"))
+	sWellKnown := getSession(srv.URL + "/.well-known/jmap")
+	sSession := getSession(srv.URL + "/jmap/session")
+	if sWellKnown.Username != "user@example.com" || sSession.Username != "user@example.com" {
+		t.Errorf("usernames %q / %q", sWellKnown.Username, sSession.Username)
 	}
-
-	r := doReq(t, "GET", srv.URL+"/jmap/session", "", nil, true)
-	data, _ := io.ReadAll(r.Body)
-	if r.StatusCode != 200 {
-		t.Fatalf("session status %d: %s", r.StatusCode, data)
-	}
-	var s jmap.Session
-	if err := json.Unmarshal(data, &s); err != nil {
-		t.Fatal(err)
-	}
-	if s.Username != "user@example.com" {
-		t.Errorf("username %q", s.Username)
-	}
-	if _, ok := s.Capabilities[jmap.CoreURI]; !ok {
-		t.Error("core capability missing")
-	}
-	if _, ok := s.Capabilities["urn:example:test"]; !ok {
-		t.Error("registered capability missing")
-	}
-	if _, ok := s.Capabilities[jmap.MailURI]; ok {
-		t.Error("unregistered mail capability advertised")
-	}
-	if s.APIURL != "http://example.test/jmap/" {
-		t.Errorf("apiUrl %q", s.APIURL)
-	}
-	if !strings.Contains(s.UploadURL, "{accountId}") || !strings.Contains(s.DownloadURL, "{blobId}") {
-		t.Errorf("templated urls: upload=%q download=%q", s.UploadURL, s.DownloadURL)
-	}
-	if !strings.Contains(s.EventSourceURL, "{types}") {
-		t.Errorf("eventSourceUrl %q", s.EventSourceURL)
-	}
-	if s.Accounts["acct1"] == nil || s.PrimaryAccounts[jmap.CoreURI] != "acct1" {
-		t.Errorf("accounts/primary: %v %v", s.Accounts, s.PrimaryAccounts)
-	}
-	core, ok, err := s.CoreCapability()
-	if err != nil || !ok || core.MaxCallsInRequest == 0 {
-		t.Errorf("core cap: %+v ok=%v err=%v", core, ok, err)
+	for _, s := range []*jmap.Session{sWellKnown, sSession} {
+		if _, ok := s.Capabilities[jmap.CoreURI]; !ok {
+			t.Error("core capability missing")
+		}
+		if _, ok := s.Capabilities["urn:example:test"]; !ok {
+			t.Error("registered capability missing")
+		}
+		if _, ok := s.Capabilities[jmap.MailURI]; ok {
+			t.Error("unregistered mail capability advertised")
+		}
+		if s.APIURL != "http://example.test/jmap/" {
+			t.Errorf("apiUrl %q", s.APIURL)
+		}
+		if !strings.Contains(s.UploadURL, "{accountId}") || !strings.Contains(s.DownloadURL, "{blobId}") {
+			t.Errorf("templated urls: upload=%q download=%q", s.UploadURL, s.DownloadURL)
+		}
+		if !strings.Contains(s.EventSourceURL, "{types}") {
+			t.Errorf("eventSourceUrl %q", s.EventSourceURL)
+		}
+		if s.Accounts["acct1"] == nil || s.PrimaryAccounts[jmap.CoreURI] != "acct1" {
+			t.Errorf("accounts/primary: %v %v", s.Accounts, s.PrimaryAccounts)
+		}
+		core, ok, err := s.CoreCapability()
+		if err != nil || !ok || core.MaxCallsInRequest == 0 {
+			t.Errorf("core cap: %+v ok=%v err=%v", core, ok, err)
+		}
 	}
 }
 

@@ -83,3 +83,9 @@ credential-form agnostic) and which accounts the session may see.
   answers truthfully or fails with `cannotCalculateChanges`.
 - Limits advertised in the session (`maxObjectsInGet/Set`, sizes)
   are enforced by the generic datatype machinery.
+- Method shapes follow the normative RFC texts (batch `MDN/send`
+  with `sent`/`notSent`, the RFC 9219 `smimeverify` capability and
+  status vocabulary, RFC 8887 `WebSocketPushEnable`/`Disable` with
+  `dataTypes` and `RequestError` objects); tests are derived from
+  the RFCs' own examples. With no configured `BaseURL`, the engine
+  absolutizes session URLs from the request host.

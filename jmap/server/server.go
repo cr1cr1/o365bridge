@@ -375,9 +375,12 @@ func (e *Engine) knownCapability(uri jmap.URI) bool {
 // upload, download, EventSource).
 func (e *Engine) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /.well-known/jmap", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, e.opts.SessionPath, http.StatusFound)
-	})
+	// RFC 8620 §2.2: the session resource IS /.well-known/jmap ("The
+	// JMAP Session resource is then https://host/.well-known/jmap
+	// (following any redirects)"). Serve the session object directly
+	// instead of redirecting: some clients (himalaya) treat the
+	// discovery GET as non-redirectable.
+	mux.HandleFunc("GET /.well-known/jmap", e.serveSession)
 	mux.HandleFunc("GET "+e.opts.SessionPath, e.serveSession)
 	mux.HandleFunc("POST "+e.opts.APIPath, e.serveAPI)
 	mux.HandleFunc("POST "+e.opts.UploadPath, e.serveUpload)
