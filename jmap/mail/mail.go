@@ -185,6 +185,15 @@ func Register(e *server.Engine, b Backend) {
 			return threadChanges(ctx, call, tc)
 		})
 	}
+
+	// Phase 2a-2 (Identity, EmailSubmission, VacationResponse,
+	// SearchSnippet, Email/import|copy|parse): each registered only
+	// when the backend implements its optional interface
+	// (IdentityBackend, SubmissionBackend, VacationBackend,
+	// SnippetBackend, ImportBackend, CopyBackend, ParseBackend).
+	// The required Backend interface above is unchanged, so existing
+	// backends are unaffected.
+	registerMail2(e, b)
 }
 
 type threadGetResponse struct {
