@@ -15,6 +15,8 @@ import (
 	"sync"
 
 	jmap "github.com/cr1cr1/o365bridge/jmap"
+	"github.com/cr1cr1/o365bridge/jmap/calendars"
+	"github.com/cr1cr1/o365bridge/jmap/contacts"
 	"github.com/cr1cr1/o365bridge/jmap/datatype"
 	"github.com/cr1cr1/o365bridge/jmap/mail"
 	"github.com/cr1cr1/o365bridge/jmap/server"
@@ -54,6 +56,8 @@ func NewEngine(reg *bridge.Registry, instancePassword string, logger zerolog.Log
 	eng := server.New(auth, server.Options{Blobs: b.blobs})
 	b.SetEngine(eng)
 	mail.Register(eng, b)
+	calendars.Register(eng, b)
+	contacts.Register(eng, b)
 	return eng, b
 }
 

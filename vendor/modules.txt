@@ -4,9 +4,12 @@ github.com/alecthomas/kong
 # github.com/cr1cr1/o365bridge/jmap v0.0.0 => ./jmap
 ## explicit; go 1.27
 github.com/cr1cr1/o365bridge/jmap
+github.com/cr1cr1/o365bridge/jmap/calendars
+github.com/cr1cr1/o365bridge/jmap/contacts
 github.com/cr1cr1/o365bridge/jmap/datatype
 github.com/cr1cr1/o365bridge/jmap/mail
 github.com/cr1cr1/o365bridge/jmap/server
+github.com/cr1cr1/o365bridge/jmap/sharing
 github.com/cr1cr1/o365bridge/jmap/ws
 # github.com/go-rod/rod v0.116.2
 ## explicit; go 1.21

@@ -51,6 +51,12 @@ type fakeProvider struct {
 	msgs    map[string]map[string]*fakeMsg
 	seq     int
 	sent    [][]byte
+
+	cals            []bridge.Calendar
+	events          map[string][]bridge.Event
+	contacts        []bridge.Contact
+	createdEvents   []bridge.Event
+	createdContacts []bridge.Contact
 }
 
 func newFakeProvider() *fakeProvider {
