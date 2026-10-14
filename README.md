@@ -128,6 +128,20 @@ deletion through the real OWA adapter against a fake HTTP server; real-tenant
 readback remains a manual check. Do not recreate events just because they are
 missing from a client's view—check Outlook on the web first to avoid duplicates.
 
+Event titles are display text, never identity keys. CalDAV preserves Outlook's
+UID, falling back to the cloud item ID when it is missing, in both the resource
+URL and iCalendar data. Opaque identifiers containing `/`, `+`, or `%` round-trip
+without being split into URL segments or decoded twice. HTTP-backed regressions
+verify separate same-title events through query, GET, and absolute multiget.
+
+For a live calendar that still shows fewer events than expected, run with
+`--log-level debug` and capture the `owa calendar listing` and
+`dav calendar report` lines from one refresh. These show discovery, date-filter,
+returned-item, unique-ID/UID, and duplicate-UID counts, without event contents or
+raw item IDs. Distinct item IDs sharing a nonempty UID can still collide; recurring
+series/exception handling is incomplete. Shared UIDs must not be blindly replaced
+with item IDs, since that can break recurrence and invitation relationships.
+
 ## JMAP
 
 The bridge also serves JMAP (mail, calendars, contacts) on its own

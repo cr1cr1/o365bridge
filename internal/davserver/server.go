@@ -277,7 +277,7 @@ func uidFromHref(href string) string {
 	href = strings.TrimSpace(href)
 	if i := strings.Index(href, "://"); i >= 0 { // absolute URI
 		if u, err := url.Parse(href); err == nil {
-			href = u.Path
+			href = u.EscapedPath()
 		}
 	}
 	base := href[strings.LastIndex(href, "/")+1:]
@@ -345,7 +345,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	segs := strings.Split(strings.Trim(path, "/"), "/")
+	// Split before decoding: opaque cloud IDs can contain encoded slashes.
+	segs := strings.Split(strings.Trim(r.URL.EscapedPath(), "/"), "/")
+	for i := 0; i < min(3, len(segs)); i++ {
+		decoded, err := url.PathUnescape(segs[i])
+		if err != nil {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		segs[i] = decoded
+	}
+	// The object filename stays escaped for uidFromHref to decode exactly once.
 	if len(segs) == 0 || segs[0] == "" {
 		h.handleRoot(w, r, email)
 		return
@@ -535,6 +545,7 @@ func (h *handler) calObjects(r *http.Request, email string, coll collection, fro
 		if uid == "" {
 			uid = ev.ID
 		}
+		ev.UID = uid
 		out = append(out, calObj{uid: uid, id: ev.ID, data: generateEventICalendar(ev)})
 	}
 	return out, nil
@@ -574,6 +585,7 @@ func (h *handler) reportCalendar(w http.ResponseWriter, r *http.Request, email s
 		h.upstreamErr(w, email, err)
 		return
 	}
+	fetched := len(objs)
 	if root == "calendar-multiget" {
 		want := map[string]bool{}
 		for _, hf := range rep.Hrefs {
@@ -593,6 +605,16 @@ func (h *handler) reportCalendar(w http.ResponseWriter, r *http.Request, email s
 		resps = append(resps, resp(href+esc(o.uid)+".ics", xProp{
 			Getetag: etag(o.id, o.data), CalData: string(o.data), Getct: "text/calendar; charset=utf-8",
 		}))
+	}
+	if event := h.logger.Debug(); event.Enabled() {
+		ids, uids := map[string]bool{}, map[string]bool{}
+		for _, object := range objs {
+			ids[object.id], uids[object.uid] = true, true
+		}
+		event.Str("protocol", "dav").Str("op", "calendar_report").Str("account", email).
+			Str("report", root).Int("fetched", fetched).Int("requested_hrefs", len(rep.Hrefs)).
+			Int("returned", len(objs)).Int("unique_ids", len(ids)).Int("unique_uids", len(uids)).
+			Int("duplicate_uids", len(objs)-len(uids)).Msg("dav calendar report")
 	}
 	h.writeMultistatus(w, resps)
 }

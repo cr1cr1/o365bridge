@@ -222,6 +222,7 @@ func (p *provider) ListEvents(ctx context.Context, calendarID string, from, to t
 		properties = append(properties, propURI(field))
 	}
 	shape := map[string]any{"__type": "ItemResponseShape:#Exchange", "BaseShape": "Default", "AdditionalProperties": properties}
+	discovered, recurring := 0, 0
 	var out []bridge.Event
 	for offset := 0; ; {
 		req := findItemReq(orDefault(calendarID, "calendar"), offset, 1000, nil)
@@ -234,6 +235,7 @@ func (p *provider) ListEvents(ctx context.Context, calendarID string, from, to t
 			return nil, fmt.Errorf("owa: ListEvents: missing discovery folder in response")
 		}
 		rows := arr(res, "RootFolder", "Items")
+		discovered += len(rows)
 		total := int(num(res, "RootFolder", "TotalItemsInView"))
 		if len(rows) == 0 {
 			if offset < total {
@@ -268,6 +270,9 @@ func (p *provider) ListEvents(ctx context.Context, calendarID string, from, to t
 					return nil, fmt.Errorf("owa: ListEvents: incomplete calendar item readback")
 				}
 				delete(pending, ev.ID)
+				if ev.Recurrence != "" {
+					recurring++
+				}
 				if !from.IsZero() && ev.End.Before(from) {
 					continue
 				}
@@ -291,6 +296,16 @@ func (p *provider) ListEvents(ctx context.Context, calendarID string, from, to t
 			break
 		}
 		offset = next
+	}
+	if event := p.log.Debug(); event.Enabled() {
+		ids, uids := map[string]bool{}, map[string]bool{}
+		for _, object := range out {
+			ids[object.ID], uids[object.UID] = true, true
+		}
+		event.Str("channel", "owa").Str("op", "list_events").Str("account", p.email).
+			Int("discovered", discovered).Int("returned", len(out)).Int("filtered", discovered-len(out)).
+			Int("recurring", recurring).Int("unique_ids", len(ids)).Int("unique_uids", len(uids)).
+			Int("duplicate_uids", len(out)-len(uids)).Msg("owa calendar listing")
 	}
 	return out, nil
 }

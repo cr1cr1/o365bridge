@@ -453,7 +453,29 @@ readback, timezone/UID/attendee/recurrence fields, and discovery past 1,000 item
 This does not change cancellation semantics, DAV resource-name identity, or
 recurring-master window expansion; real-tenant readback remains owner-run.
 
+Calendar identity is independent of event titles. DAV keeps existing Outlook
+UIDs and serializes its cloud-ID fallback when a provider UID is absent. Routing
+splits escaped path segments before decoding; object filenames and absolute
+multiget hrefs are decoded once so opaque IDs containing slashes or percent
+sequences remain intact. Regressions cover independent same-title events with
+distinct UIDs or ID fallbacks, GET/query/absolute multiget, and count-only debug
+logs for OWA discovery/filtering and DAV output. This verifies conditional
+identifier defects, not the cause of any particular live same-title report.
+Nonempty shared UIDs and recurring-series/exception semantics are not rewritten.
+The identity correction passed ten race-test repetitions for DAV, OWA, Graph,
+and JMAP callers, plus vet and build. The full-suite attempt also hit an
+intermittent `TestSMTPTLSCloseDropsConnections/implicit_handshake` shutdown
+failure; the same failure reproduced from the unchanged `e362b03` baseline.
+SMTP code was left untouched rather than expanding the calendar fix's scope.
+
 Known fidelity limits, all explicit rather than silent:
+
+- **Calendar UID/recurrence identity:** distinct cloud items sharing a nonempty
+  UID can produce the same DAV resource URL. Recurring masters are still filtered
+  by their initial start/end; recurrence-ID and exception representation are
+  incomplete. Live missing-event diagnosis must distinguish independent records
+  from series occurrences before changing UIDs; debug counters reveal duplicate
+  UIDs and date-filtered records without exposing event contents.
 
 - **Graph recurrence on write:** bridge RRULE strings are not yet
   converted to Graph's structured recurrence, so recurring
