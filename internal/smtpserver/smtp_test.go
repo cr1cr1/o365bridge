@@ -53,9 +53,17 @@ func (fakeLogin) Renew(_ context.Context, _ string, s bridge.Session) (bridge.Se
 	return s, nil
 }
 
-type fakeFactory struct{ p *fakeProvider }
+type fakeFactory struct {
+	p     *fakeProvider
+	provs map[string]*fakeProvider // per-account providers, when set
+}
 
-func (f fakeFactory) New(string, bridge.Session) bridge.Provider { return f.p }
+func (f fakeFactory) New(email string, _ bridge.Session) bridge.Provider {
+	if f.provs != nil {
+		return f.provs[email]
+	}
+	return f.p
+}
 
 const (
 	acct = "user@example.com"
@@ -67,10 +75,27 @@ func start(t *testing.T, p *fakeProvider) (addr string, cleanup func()) {
 	return startWithLogger(t, p, zerolog.Nop())
 }
 
+func startMulti(t *testing.T, provs map[string]*fakeProvider) (addr string, cleanup func()) {
+	t.Helper()
+	reg, err := bridge.NewRegistry(bridge.Config{
+		StateDir: t.TempDir(), Login: fakeLogin{}, Factory: fakeFactory{provs: provs},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := smtpserver.New(reg, pw, zerolog.Nop())
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(l) }()
+	return l.Addr().String(), func() { _ = srv.Close() }
+}
+
 func startWithLogger(t *testing.T, p *fakeProvider, logger zerolog.Logger) (addr string, cleanup func()) {
 	t.Helper()
 	reg, err := bridge.NewRegistry(bridge.Config{
-		StateDir: t.TempDir(), Login: fakeLogin{}, Factory: fakeFactory{p},
+		StateDir: t.TempDir(), Login: fakeLogin{}, Factory: fakeFactory{p: p},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -395,6 +420,53 @@ func TestSMTPEmptyReversePathAndCommandLog(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("log missing %s: %s", want, out)
 		}
+	}
+}
+
+// Two accounts sending at the same time: each message is
+// delivered through its own account's provider only.
+func TestSMTPTwoAccountsIsolated(t *testing.T) {
+	const (
+		emailA = "a@corp.example"
+		emailB = "b@corp.example"
+	)
+	provA, provB := &fakeProvider{}, &fakeProvider{}
+	addr, done := startMulti(t, map[string]*fakeProvider{emailA: provA, emailB: provB})
+	defer done()
+
+	send := func(email, subject string) {
+		cl := dial(t, addr)
+		defer cl.c.Close()
+		cl.cmd(t, "EHLO client.example")
+		if r := cl.cmd(t, "AUTH PLAIN %s", authPlain(email, pw)); !strings.HasPrefix(r, "235") {
+			t.Fatalf("%s auth = %q", email, r)
+		}
+		if r := cl.cmd(t, "MAIL FROM:<%s>", email); !strings.HasPrefix(r, "250") {
+			t.Fatalf("%s MAIL = %q", email, r)
+		}
+		if r := cl.cmd(t, "RCPT TO:<dest@example.com>"); !strings.HasPrefix(r, "250") {
+			t.Fatalf("%s RCPT = %q", email, r)
+		}
+		if r := cl.cmd(t, "DATA"); !strings.HasPrefix(r, "354") {
+			t.Fatalf("%s DATA = %q", email, r)
+		}
+		body := "From: " + email + "\r\nTo: dest@example.com\r\nSubject: " + subject + "\r\n\r\nhello\r\n.\r\n"
+		if _, err := cl.c.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+		if r := cl.readReply(t); !strings.HasPrefix(r, "250") {
+			t.Fatalf("%s DATA result = %q", email, r)
+		}
+	}
+	send(emailA, "from-a")
+	send(emailB, "from-b")
+
+	sentA, sentB := provA.sentCopy(), provB.sentCopy()
+	if len(sentA) != 1 || !strings.Contains(string(sentA[0]), "Subject: from-a") {
+		t.Fatalf("account A provider sent = %q, want exactly its own message", sentA)
+	}
+	if len(sentB) != 1 || !strings.Contains(string(sentB[0]), "Subject: from-b") {
+		t.Fatalf("account B provider sent = %q, want exactly its own message", sentB)
 	}
 }
 

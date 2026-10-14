@@ -152,6 +152,28 @@ func TestProfileDir(t *testing.T) {
 	}
 }
 
+// Each account's browser profile lives inside its own account
+// directory, so two accounts never share cookies or a logged-in
+// web session.
+func TestProfileDirsArePerAccount(t *testing.T) {
+	m := New(t.TempDir(), "cid", zerolog.Nop())
+	dirA, err := m.profileDir("a@corp.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirB, err := m.profileDir("b@corp.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirA == dirB {
+		t.Fatalf("both accounts share profile dir %s", dirA)
+	}
+	if !strings.HasSuffix(dirA, "accounts/a@corp.example/rod-profile") ||
+		!strings.HasSuffix(dirB, "accounts/b@corp.example/rod-profile") {
+		t.Errorf("profile dirs = %s , %s", dirA, dirB)
+	}
+}
+
 func TestOWARenewTimeoutFieldDefault(t *testing.T) {
 	m := New(t.TempDir(), "cid", zerolog.Nop())
 	if m.OWARenewTimeout != 30*time.Second {

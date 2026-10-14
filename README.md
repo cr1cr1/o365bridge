@@ -41,8 +41,13 @@ forces re-authentication (roughly every three months), the next
 client operation holds while the login window reappears.
 
 Several accounts can be used at once: add each in your client the
-same way. Each gets its own browser profile and session under the
-state directory.
+same way, with the account's email as the username and the same
+bridge password. Accounts are fully isolated from each other —
+separate logins, browser profiles, sessions, and state directories —
+so one account's re-login or failure never touches another. This is
+covered by automated two-account isolation tests (registry, IMAP,
+SMTP, CalDAV/CardDAV); trying it with two real Microsoft accounts
+remains a manual check, since the tests run against fakes.
 
 ## Flags (all also available as `OB_<FLAG>` environment variables)
 

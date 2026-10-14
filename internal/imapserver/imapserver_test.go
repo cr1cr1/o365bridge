@@ -374,9 +374,38 @@ func (p *fakeProvider) addMessage(folderID, raw string, flags bridge.Flags, date
 	return id
 }
 
-type fakeFactory struct{ prov *fakeProvider }
+type fakeFactory struct {
+	prov  *fakeProvider
+	provs map[string]*fakeProvider // per-account providers, when set
+}
 
-func (f fakeFactory) New(string, bridge.Session) bridge.Provider { return f.prov }
+func (f fakeFactory) New(email string, _ bridge.Session) bridge.Provider {
+	if f.provs != nil {
+		return f.provs[email]
+	}
+	return f.prov
+}
+
+func startMultiServer(t *testing.T, provs map[string]*fakeProvider) net.Listener {
+	t.Helper()
+	reg, err := bridge.NewRegistry(bridge.Config{
+		StateDir: t.TempDir(),
+		Login:    fakeLogin{},
+		Factory:  fakeFactory{provs: provs},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := imapserver.New(reg, testPassword, zerolog.Nop())
+	srv.IdlePollInterval = 50 * time.Millisecond
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return ln
+}
 
 // ---------- server harness ----------
 
@@ -459,6 +488,15 @@ func (c *client) readUntil(tag string) []string {
 		if strings.HasPrefix(line, tag+" ") {
 			return out
 		}
+	}
+}
+
+func (c *client) loginAs(tag, email string) {
+	c.t.Helper()
+	resp := c.cmd(tag, "LOGIN "+email+" "+testPassword)
+	joined := strings.Join(resp, "\n")
+	if !strings.Contains(joined, tag+" OK") {
+		c.t.Fatalf("login as %s = %s", email, joined)
 	}
 }
 
@@ -854,6 +892,67 @@ func TestExpungeAfterStoreDeleted(t *testing.T) {
 	// folder now has 1 message upstream
 	if len(prov.msgs["inbox"]) != 1 {
 		t.Fatalf("inbox len after expunge = %d", len(prov.msgs["inbox"]))
+	}
+}
+
+// Two accounts connected at the same time: each session sees
+// only its own mailbox, and an APPEND by one account never shows
+// up in the other's.
+func TestIMAPTwoAccountsIsolated(t *testing.T) {
+	const (
+		emailA = "a@corp.example"
+		emailB = "b@corp.example"
+	)
+	provA, provB := newFakeProvider(), newFakeProvider()
+	provA.addMessage("inbox", sampleRaw("A secret", "for a only"), nil, time.Now())
+	provB.addMessage("inbox", sampleRaw("B secret", "for b only"), nil, time.Now())
+	ln := startMultiServer(t, map[string]*fakeProvider{emailA: provA, emailB: provB})
+
+	ca := dial(t, ln)
+	ca.loginAs("a", emailA)
+	cb := dial(t, ln)
+	cb.loginAs("a", emailB)
+
+	selA := joined(ca.cmd("b", "SELECT INBOX"))
+	if !strings.Contains(selA, "* 1 EXISTS") {
+		t.Fatalf("A SELECT: %s", selA)
+	}
+	selB := joined(cb.cmd("b", "SELECT INBOX"))
+	if !strings.Contains(selB, "* 1 EXISTS") {
+		t.Fatalf("B SELECT: %s", selB)
+	}
+	fetchA := joined(ca.cmd("c", "FETCH 1 (ENVELOPE)"))
+	if !strings.Contains(fetchA, "A secret") || strings.Contains(fetchA, "B secret") {
+		t.Fatalf("A FETCH leaked or missing: %s", fetchA)
+	}
+	fetchB := joined(cb.cmd("c", "FETCH 1 (ENVELOPE)"))
+	if !strings.Contains(fetchB, "B secret") || strings.Contains(fetchB, "A secret") {
+		t.Fatalf("B FETCH leaked or missing: %s", fetchB)
+	}
+
+	// A appends; B's mailbox must not change, A's must grow.
+	raw := sampleRaw("A appended", "only in a")
+	if _, err := fmt.Fprintf(ca.conn, "d APPEND INBOX {%d}\r\n", len(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ca.conn.Write([]byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(ca.conn, "\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if resp := joined(ca.readUntil("d")); !strings.Contains(resp, "d OK") {
+		t.Fatalf("A APPEND: %s", resp)
+	}
+	if got := len(provA.msgs["inbox"]); got != 2 {
+		t.Fatalf("A inbox = %d messages, want 2", got)
+	}
+	if got := len(provB.msgs["inbox"]); got != 1 {
+		t.Fatalf("B inbox = %d messages after A's APPEND, want 1", got)
+	}
+	selB2 := joined(cb.cmd("d", "SELECT INBOX"))
+	if !strings.Contains(selB2, "* 1 EXISTS") {
+		t.Fatalf("B re-SELECT after A APPEND: %s", selB2)
 	}
 }
 

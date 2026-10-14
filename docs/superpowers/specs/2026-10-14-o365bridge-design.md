@@ -452,6 +452,13 @@ Known fidelity limits, all explicit rather than silent:
   in `internal/davserver`; Graph message size is reported as 0
   (Graph exposes no size field), so RFC822.SIZE can be 0 until a
   body is fetched.
+- **Multiple accounts:** supported by construction (the client
+  username selects the account; logins, sessions, browser profiles,
+  ID maps, and state directories are all per account) and covered
+  by automated two-account isolation tests in `internal/bridge`,
+  `internal/imapserver`, `internal/smtpserver`, `internal/davserver`,
+  and `internal/rodlogin`. Two *real* Microsoft accounts in parallel
+  remain an owner-run live check.
 - **Live behaviour unproven:** real-tenant Graph consent/refresh,
   OWA header capture via Rod, Thunderbird/Himalaya interop, and
   the ~3-month re-login rhythm are owner-run gates.

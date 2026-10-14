@@ -28,9 +28,17 @@ func (fakeLogin) Renew(_ context.Context, _ string, s bridge.Session) (bridge.Se
 	return s, nil
 }
 
-type fakeFactory struct{ p *fakeProvider }
+type fakeFactory struct {
+	p     *fakeProvider
+	provs map[string]*fakeProvider // per-account providers, when set
+}
 
-func (f fakeFactory) New(string, bridge.Session) bridge.Provider { return f.p }
+func (f fakeFactory) New(email string, _ bridge.Session) bridge.Provider {
+	if f.provs != nil {
+		return f.provs[email]
+	}
+	return f.p
+}
 
 type respondCall struct{ Cal, ID, Resp string }
 
@@ -183,12 +191,35 @@ func newHandler(t *testing.T, p *fakeProvider) http.Handler {
 func newHandlerWithLogger(t *testing.T, p *fakeProvider, logger zerolog.Logger) http.Handler {
 	t.Helper()
 	reg, err := bridge.NewRegistry(bridge.Config{
-		StateDir: t.TempDir(), Login: fakeLogin{}, Factory: fakeFactory{p},
+		StateDir: t.TempDir(), Login: fakeLogin{}, Factory: fakeFactory{p: p},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return New(reg, pw, logger)
+}
+
+func newMultiHandler(t *testing.T, provs map[string]*fakeProvider) http.Handler {
+	t.Helper()
+	reg, err := bridge.NewRegistry(bridge.Config{
+		StateDir: t.TempDir(), Login: fakeLogin{}, Factory: fakeFactory{provs: provs},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(reg, pw, zerolog.Nop())
+}
+
+func reqAs(t *testing.T, h http.Handler, method, path, body, email string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.SetBasicAuth(email, pw)
+	if body != "" {
+		r.Header.Set("Content-Type", "text/calendar; charset=utf-8")
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	return rr
 }
 
 // Upstream failures must be warnings in the bridge log, per
@@ -309,6 +340,39 @@ func TestDAVPutEventThenReportAndGet(t *testing.T) {
 	rr = req(t, h, "GET", "/caldav/"+acct+"/cal1/ev1.ics", "", true)
 	if rr.Code != 404 {
 		t.Fatalf("GET after delete %d, want 404", rr.Code)
+	}
+}
+
+// Two accounts: an event created by account A is invisible to
+// account B, and A's credentials cannot address B's URLs at all.
+func TestDAVTwoAccountsIsolated(t *testing.T) {
+	const (
+		emailA = "a@corp.example"
+		emailB = "b@corp.example"
+	)
+	fakeA, fakeB := newFake(), newFake()
+	fakeA.account, fakeB.account = emailA, emailB
+	h := newMultiHandler(t, map[string]*fakeProvider{emailA: fakeA, emailB: fakeB})
+
+	rr := reqAs(t, h, "PUT", "/caldav/"+emailA+"/cal1/ev1.ics", eventICS, emailA)
+	if rr.Code >= 300 {
+		t.Fatalf("A PUT event %d %s", rr.Code, rr.Body.String())
+	}
+	rr = reqAs(t, h, "GET", "/caldav/"+emailA+"/cal1/ev1.ics", "", emailA)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "UID:ev1") {
+		t.Fatalf("A GET own event %d %s", rr.Code, rr.Body.String())
+	}
+	rr = reqAs(t, h, "GET", "/caldav/"+emailB+"/cal1/ev1.ics", "", emailB)
+	if rr.Code != 404 {
+		t.Fatalf("B GET A's event = %d, want 404 (invisible, not leaked): %s", rr.Code, rr.Body.String())
+	}
+	// A's credentials addressing B's home: forbidden.
+	rr = reqAs(t, h, "PROPFIND", "/caldav/"+emailB+"/", "", emailA)
+	if rr.Code != 403 {
+		t.Fatalf("A credentials on B path = %d, want 403", rr.Code)
+	}
+	if len(fakeB.events) != 0 {
+		t.Fatalf("B provider holds %d events after A's PUT, want 0", len(fakeB.events))
 	}
 }
 

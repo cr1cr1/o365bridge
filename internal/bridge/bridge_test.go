@@ -15,33 +15,55 @@ import (
 // --- fakes ---
 
 type fakeLogin struct {
-	mu       sync.Mutex
-	logins   []bridge.Channel
-	renews   int
-	loginErr map[bridge.Channel]error
-	renewErr error
+	mu            sync.Mutex
+	logins        []bridge.Channel
+	loginsByEmail map[string][]bridge.Channel
+	renews        int
+	renewsByEmail map[string]int
+	loginErr      map[bridge.Channel]error
+	renewErr      error
 }
 
 func (f *fakeLogin) Login(_ context.Context, email string, ch bridge.Channel) (bridge.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logins = append(f.logins, ch)
+	if f.loginsByEmail == nil {
+		f.loginsByEmail = map[string][]bridge.Channel{}
+	}
+	f.loginsByEmail[email] = append(f.loginsByEmail[email], ch)
 	if err := f.loginErr[ch]; err != nil {
 		return bridge.Session{}, err
 	}
-	return bridge.Session{Email: email, Channel: ch, AccessToken: "tok", TokenExpiry: time.Now().Add(time.Hour)}, nil
+	return bridge.Session{Email: email, Channel: ch, AccessToken: "tok-" + email, TokenExpiry: time.Now().Add(time.Hour)}, nil
 }
 
-func (f *fakeLogin) Renew(_ context.Context, _ string, s bridge.Session) (bridge.Session, error) {
+func (f *fakeLogin) Renew(_ context.Context, email string, s bridge.Session) (bridge.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.renews++
+	if f.renewsByEmail == nil {
+		f.renewsByEmail = map[string]int{}
+	}
+	f.renewsByEmail[email]++
 	if f.renewErr != nil {
 		return bridge.Session{}, f.renewErr
 	}
 	s.AccessToken = "tok2"
 	s.TokenExpiry = time.Now().Add(time.Hour)
 	return s, nil
+}
+
+func (f *fakeLogin) loginCount(email string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.loginsByEmail[email])
+}
+
+func (f *fakeLogin) renewCount(email string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.renewsByEmail[email]
 }
 
 type fakeProvider struct {
@@ -54,20 +76,38 @@ type fakeProvider struct {
 
 func (p *fakeProvider) Ping(context.Context) error { return p.pingErr }
 
+type factoryCall struct {
+	email   string
+	channel bridge.Channel
+	token   string
+}
+
 type fakeFactory struct {
 	mu        sync.Mutex
 	channels  []bridge.Channel
 	providers map[bridge.Channel]*fakeProvider
+	byEmail   map[string]*fakeProvider
+	made      []factoryCall
 }
 
-func (f *fakeFactory) New(_ string, s bridge.Session) bridge.Provider {
+func (f *fakeFactory) New(email string, s bridge.Session) bridge.Provider {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.channels = append(f.channels, s.Channel)
+	f.made = append(f.made, factoryCall{email: email, channel: s.Channel, token: s.AccessToken})
+	if p := f.byEmail[email]; p != nil {
+		return p
+	}
 	if p := f.providers[s.Channel]; p != nil {
 		return p
 	}
 	return &fakeProvider{}
+}
+
+func (f *fakeFactory) madeCalls() []factoryCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]factoryCall(nil), f.made...)
 }
 
 func newRegistry(t *testing.T, graphID string, login *fakeLogin, fac *fakeFactory) *bridge.Registry {
@@ -386,6 +426,163 @@ func TestStoreAccountDirCannotEscape(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "accounts", ".._evil@corp.example", "account.json")); err != nil {
 		t.Fatalf("sanitised account file missing: %v", err)
+	}
+}
+
+// Two accounts used at the same time: each gets its own login
+// (exactly one, single-flighted per account), its own provider
+// built from its own session token, its own persisted state and
+// its own ID map. Nothing crosses over.
+func TestTwoAccountsConcurrentIsolation(t *testing.T) {
+	const (
+		emailA = "a@corp.example"
+		emailB = "b@corp.example"
+	)
+	login := &fakeLogin{}
+	aP, bP := &fakeProvider{}, &fakeProvider{}
+	fac := &fakeFactory{byEmail: map[string]*fakeProvider{emailA: aP, emailB: bP}}
+	r := newRegistry(t, "", login, fac)
+
+	// Concurrent first use of both accounts, repeatedly.
+	var wg sync.WaitGroup
+	errs := make([]error, 16)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			email := emailA
+			if i%2 == 1 {
+				email = emailB
+			}
+			p, err := r.Provider(context.Background(), email)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			want := bridge.Provider(aP)
+			if email == emailB {
+				want = bridge.Provider(bP)
+			}
+			if p != want {
+				errs[i] = errors.New("provider for " + email + " is the other account's provider")
+			}
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if got := login.loginCount(emailA); got != 1 {
+		t.Fatalf("logins for %s = %d, want exactly 1", emailA, got)
+	}
+	if got := login.loginCount(emailB); got != 1 {
+		t.Fatalf("logins for %s = %d, want exactly 1", emailB, got)
+	}
+	// Every provider ever built carried its own account's session.
+	for _, c := range fac.madeCalls() {
+		if c.token != "tok-"+c.email {
+			t.Fatalf("factory built provider for %s with token %q (another account's session?)", c.email, c.token)
+		}
+	}
+
+	// ID maps are per account: A's message is invisible to B, and
+	// B allocating the same upstream ID does not disturb A.
+	st := r.Store()
+	mapA, err := st.IDMap(emailA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapB, err := st.IDMap(emailB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uidA, err := mapA.UID("INBOX", "shared-upstream-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mapB.UpstreamID("INBOX", uidA); ok {
+		t.Fatal("account B's ID map can see account A's message")
+	}
+	if _, err := mapB.UID("INBOX", "shared-upstream-id"); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := mapA.UpstreamID("INBOX", uidA); !ok || id != "shared-upstream-id" {
+		t.Fatalf("account A lookup after B allocated = %q,%v", id, ok)
+	}
+
+	// Deleting one account's state leaves the other fully usable.
+	if err := st.DeleteAccount(emailA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Account(emailA); !errors.Is(err, bridge.ErrUnknownAccount) {
+		t.Fatalf("deleted account err = %v, want ErrUnknownAccount", err)
+	}
+	if _, err := r.Account(emailB); err != nil {
+		t.Fatalf("account B affected by deleting A: %v", err)
+	}
+	if _, err := r.Provider(context.Background(), emailB); err != nil {
+		t.Fatalf("account B provider after deleting A: %v", err)
+	}
+	if got := login.loginCount(emailB); got != 1 {
+		t.Fatalf("account B had to log in again after A was deleted: logins = %d", got)
+	}
+}
+
+// An auth failure on account A triggers renewal/fallback for A
+// only: account B is not renewed, not re-logged-in, and its
+// operations are never invoked for A's recovery.
+func TestTwoAccountsRecoveryIsolation(t *testing.T) {
+	const (
+		emailA = "a@corp.example"
+		emailB = "b@corp.example"
+	)
+	login := &fakeLogin{renewErr: bridge.AuthError("refresh revoked")}
+	aP, bP := &fakeProvider{}, &fakeProvider{}
+	fac := &fakeFactory{byEmail: map[string]*fakeProvider{emailA: aP, emailB: bP}}
+	r := newRegistry(t, "", login, fac)
+	for _, email := range []string{emailA, emailB} {
+		if _, err := r.Provider(context.Background(), email); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	aCalls, bCalls := 0, 0
+	err := r.Call(context.Background(), emailA, func(_ context.Context, p bridge.Provider) error {
+		switch p {
+		case bridge.Provider(aP):
+			aCalls++
+			if aCalls == 1 {
+				return bridge.AuthError("token dead")
+			}
+			return nil
+		case bridge.Provider(bP):
+			bCalls++
+			return nil
+		}
+		return errors.New("unexpected provider")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aCalls != 2 {
+		t.Fatalf("account A op calls = %d, want 2 (fail then retry after recovery)", aCalls)
+	}
+	if bCalls != 0 {
+		t.Fatalf("account A's operation ran on account B's provider %d times", bCalls)
+	}
+	if got := login.renewCount(emailA); got != 1 {
+		t.Fatalf("renewals for A = %d, want 1", got)
+	}
+	if got := login.renewCount(emailB); got != 0 {
+		t.Fatalf("account B was renewed because A failed: renewals = %d", got)
+	}
+	if got := login.loginCount(emailB); got != 1 {
+		t.Fatalf("account B logins = %d, want still 1 (its initial login only)", got)
+	}
+	if got := login.loginCount(emailA); got != 2 {
+		t.Fatalf("account A logins = %d, want 2 (initial + fallback re-login)", got)
 	}
 }
 
