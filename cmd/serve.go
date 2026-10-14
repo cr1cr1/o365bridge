@@ -34,7 +34,7 @@ type ServeCmd struct {
 	ImapPort      int    `help:"IMAP listen port" default:"1143"`
 	SmtpPort      int    `help:"SMTP submission listen port" default:"1025"`
 	DavPort       int    `help:"CalDAV/CardDAV HTTP listen port" default:"1080"`
-	JmapPort      int    `help:"JMAP HTTP listen port (0 disables)" default:"8080"`
+	JmapPort      int    `help:"JMAP HTTP listen port (0 disables)" default:"18080"`
 	Password      string `help:"Bridge instance password clients use with their email as username (prefer the OB_PASSWORD envar over the flag)"`
 	GraphClientID string `help:"Admin-created Azure app client ID; empty disables Graph and uses OWA directly" default:""`
 	StateDir      string `help:"Session cache directory (accounts, browser profiles, ID maps)" default:""`
