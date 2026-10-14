@@ -119,6 +119,7 @@ type Event struct {
 	Summary     string
 	Description string
 	Location    string
+	Categories  []string // nil = not supplied; non-nil empty = clear on provider update
 	Start       time.Time
 	End         time.Time
 	AllDay      bool

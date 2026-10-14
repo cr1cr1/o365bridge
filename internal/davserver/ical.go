@@ -148,7 +148,8 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 				comp = "VCALENDAR"
 			case "VEVENT":
 				flush()
-				ev = &bridge.Event{}
+				// A CalDAV PUT is a full representation; omitted categories are cleared.
+				ev = &bridge.Event{Categories: []string{}}
 				comp = "VEVENT"
 			case "VTODO":
 				flush()
@@ -254,6 +255,27 @@ func stripMailto(s string) string {
 	return s
 }
 
+// parseCategories splits the TEXT list before unescaping literal commas.
+func parseCategories(value string) []string {
+	var categories []string
+	if value == "" {
+		return categories
+	}
+	start := 0
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '\\':
+			if i+1 < len(value) {
+				i++
+			}
+		case ',':
+			categories = append(categories, unescapeText(value[start:i]))
+			start = i + 1
+		}
+	}
+	return append(categories, unescapeText(value[start:]))
+}
+
 func applyEventProp(ev *bridge.Event, p icalProp) {
 	switch p.Name {
 	case "UID":
@@ -264,6 +286,8 @@ func applyEventProp(ev *bridge.Event, p icalProp) {
 		ev.Description = unescapeText(p.Value)
 	case "LOCATION":
 		ev.Location = unescapeText(p.Value)
+	case "CATEGORIES":
+		ev.Categories = append(ev.Categories, parseCategories(p.Value)...)
 	case "DTSTART":
 		ev.Start, ev.AllDay = parseDateTime(p)
 		if tz := p.Params["TZID"]; tz != "" {
@@ -379,6 +403,13 @@ func generateEventICalendar(ev bridge.Event) []byte {
 	}
 	if ev.Location != "" {
 		lines = append(lines, "LOCATION:"+escapeText(ev.Location))
+	}
+	if len(ev.Categories) > 0 {
+		categories := make([]string, len(ev.Categories))
+		for i, category := range ev.Categories {
+			categories[i] = escapeText(category)
+		}
+		lines = append(lines, "CATEGORIES:"+strings.Join(categories, ","))
 	}
 	if ev.Recurrence != "" {
 		lines = append(lines, "RRULE:"+strings.TrimPrefix(ev.Recurrence, "RRULE:"))

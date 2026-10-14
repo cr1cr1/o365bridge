@@ -142,6 +142,31 @@ raw item IDs. Distinct item IDs sharing a nonempty UID can still collide; recurr
 series/exception handling is incomplete. Shared UIDs must not be blindly replaced
 with item IDs, since that can break recurrence and invitation relationships.
 
+## Event categories
+
+Outlook event category **names** are synchronized through OWA and Graph to
+CalDAV `CATEGORIES`, including multiple categories, Unicode, and names containing
+commas, semicolons, or backslashes. Category changes affect the event's ETag, so
+clients can detect them on refresh. Restart the current bridge build and
+synchronize the remote calendar **before editing** to fetch existing cloud
+categories. Stale conditional VEVENT PUTs with `If-Match` are rejected with HTTP
+412 before any update/invitation response; a missing event with `If-Match` is not
+recreated. Refresh and retry rather than forcing an overwrite. This check is not
+an atomic upstream compare-and-swap; clients sending unconditional full PUTs
+still need fresh calendar data to avoid unintended category removal.
+
+Normal GET-edit-PUT event updates retain the categories in the downloaded object.
+Changing categories writes the native Outlook category array; removing the final
+category in a full CalDAV PUT clears it upstream. Programmatic/JMAP provider
+updates that do not supply this field leave cloud categories unchanged.
+
+This maps names only, not Outlook's master-category catalog or color palette.
+Thunderbird category colors are local client settings. Mail tags, task/contact
+categories, and a JMAP category mapping are outside this change. HTTP-backed
+regressions cover cloud readback through GET/query/multiget, category edits and
+clearing, and same-title sibling isolation; live client/tenant acceptance remains
+an owner-run check.
+
 ## Tasks (Thunderbird / CalDAV)
 
 Outlook tasks are native task items, not calendar appointments. The bridge

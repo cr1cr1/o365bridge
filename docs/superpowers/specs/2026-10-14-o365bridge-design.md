@@ -60,16 +60,20 @@ which is accepted behaviour, not a defect.
 - "Filter" support means client-side filters work: the bridge is not
   involved except by providing prompt new-mail notification (IDLE)
   and rock-solid move/flag/search primitives.
-- "Labelling" means filing into folders. No category/tag mapping.
+- Mail "labelling" means filing into folders; mail category/tag mapping remains
+  outside scope. Calendar event category names are mapped to CalDAV CATEGORIES
+  under the later event-category request; master-category colors/catalogs and
+  task/contact category mapping remain outside scope.
 
 ## Non-goals (first version)
 
 - EWS (Microsoft disables it on Office 365 from 2026-10-01) and EAS —
   dropped entirely, not just deferred.
 - OneDrive / files over WebDAV. JMAP (possible later addition).
-- Server-side Outlook rules; Outlook categories; shared mailboxes and
-  the corporate GAL are out unless they fall out naturally (builder:
-  do not build them deliberately).
+- Server-side Outlook rules; mail/task/contact categories and Outlook master-category
+  palettes; shared mailboxes and the corporate GAL are out unless they fall out
+  naturally (builder: do not build them deliberately). Calendar event category
+  names are the explicitly requested exception.
 - Personal Microsoft accounts (see Goals). Windows and macOS are
   secondary: **Linux desktop is the only v1 gate**; other OSes must
   not block it.
@@ -467,6 +471,16 @@ and JMAP callers, plus vet and build. The full-suite attempt also hit an
 intermittent `TestSMTPTLSCloseDropsConnections/implicit_handshake` shutdown
 failure; the same failure reproduced from the unchanged `e362b03` baseline.
 SMTP code was left untouched rather than expanding the calendar fix's scope.
+
+Event category names now map from native OWA/Graph arrays through the shared
+Event model into escaped iCalendar CATEGORIES. Full CalDAV PUTs retain supplied
+names or remove omitted categories; category-unaware programmatic/JMAP updates
+leave the cloud field unchanged. Conditional VEVENT PUTs reject stale If-Match
+values before update/response and do not recreate missing events. Refresh old
+client caches before editing; unconditional writes and external edits between
+read/write are not protected by an atomic cloud precondition. Category palettes,
+mail/task/contact categories, and a JMAP category schema remain outside scope.
+See the [event-category design](<2026-10-15-event-categories-design.md>).
 
 Native task readback is repaired separately from appointments. Task collections
 advertise VTODO only. OWA discovers IDs without the mail-list shape and hydrates

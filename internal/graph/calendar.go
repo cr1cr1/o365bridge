@@ -30,10 +30,11 @@ func (p *provider) ListCalendars(ctx context.Context) ([]bridge.Calendar, error)
 // --- Events ---
 
 type graphEvent struct {
-	ID      string `json:"id"`
-	ICalUID string `json:"iCalUId"`
-	Subject string `json:"subject"`
-	Body    struct {
+	ID         string   `json:"id"`
+	ICalUID    string   `json:"iCalUId"`
+	Subject    string   `json:"subject"`
+	Categories []string `json:"categories"`
+	Body       struct {
 		ContentType string `json:"contentType"`
 		Content     string `json:"content"`
 	} `json:"body"`
@@ -60,7 +61,7 @@ type graphEvent struct {
 func (g graphEvent) toEvent(calendarID string) bridge.Event {
 	ev := bridge.Event{
 		ID: g.ID, CalendarID: calendarID, UID: g.ICalUID, Summary: g.Subject,
-		Description: g.Body.Content, Location: g.Location.DisplayName,
+		Description: g.Body.Content, Location: g.Location.DisplayName, Categories: g.Categories,
 		Start: fromGraphDT(g.Start), End: fromGraphDT(g.End), AllDay: g.IsAllDay,
 		Organizer: g.Organizer.EmailAddress.Address,
 	}
@@ -91,6 +92,9 @@ func eventJSON(ev bridge.Event) map[string]any {
 		"start":    toGraphDT(ev.Start, ev.TimeZone),
 		"end":      toGraphDT(ev.End, ev.TimeZone),
 		"isAllDay": ev.AllDay,
+	}
+	if ev.Categories != nil {
+		m["categories"] = ev.Categories
 	}
 	if ev.Description != "" {
 		m["body"] = map[string]any{"contentType": "Text", "content": ev.Description}

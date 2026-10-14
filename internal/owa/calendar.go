@@ -128,6 +128,14 @@ func eventFromItem(item map[string]any, calendarID string) bridge.Event {
 		Recurrence: recurrenceToRRULE(item),
 		TimeZone:   iana,
 	}
+	if categories := arr(item, "Categories"); categories != nil {
+		ev.Categories = make([]string, 0, len(categories))
+		for _, value := range categories {
+			if category, ok := value.(string); ok {
+				ev.Categories = append(ev.Categories, category)
+			}
+		}
+	}
 	if loc := str(item, "Location", "DisplayName"); loc != "" {
 		ev.Location = loc
 	} else {
@@ -189,6 +197,9 @@ func eventToOWA(ev bridge.Event) map[string]any {
 		"Location": map[string]any{"__type": "EnhancedLocation:#Exchange", "DisplayName": ev.Location,
 			"PostalAddress": map[string]any{"__type": "PersonaPostalAddress:#Exchange", "Type": "Business", "LocationSource": "None"}},
 	}
+	if ev.Categories != nil {
+		item["Categories"] = ev.Categories
+	}
 	if len(ev.Attendees) > 0 {
 		atts := make([]any, 0, len(ev.Attendees))
 		for _, a := range ev.Attendees {
@@ -215,7 +226,7 @@ func (p *provider) ListEvents(ctx context.Context, calendarID string, from, to t
 	// FindItem returns discovery rows, not the complete event needed by DAV/JMAP.
 	var properties []any
 	for _, field := range []string{
-		"item:Subject", "item:Body", "item:TextBody", "item:ReminderIsSet", "item:ReminderMinutesBeforeStart",
+		"item:Subject", "item:Body", "item:TextBody", "item:Categories", "item:ReminderIsSet", "item:ReminderMinutesBeforeStart",
 		"calendar:Start", "calendar:End", "calendar:UID", "calendar:IsAllDayEvent", "calendar:EnhancedLocation",
 		"calendar:Organizer", "calendar:RequiredAttendees", "calendar:OptionalAttendees", "calendar:Recurrence",
 		"calendar:StartTimeZone", "calendar:EndTimeZone",
@@ -364,6 +375,9 @@ func (p *provider) UpdateEvent(ctx context.Context, ev bridge.Event) error {
 	}
 	if ev.Summary != "" {
 		updates = setField(updates, "CalendarItem", "Subject", calItem("Subject", ev.Summary))
+	}
+	if ev.Categories != nil {
+		updates = setField(updates, "CalendarItem", "Categories", calItem("Categories", ev.Categories))
 	}
 	if ev.Description != "" {
 		updates = setField(updates, "CalendarItem", "Body", calItem("Body", map[string]any{"__type": "BodyContentType:#Exchange", "BodyType": "HTML", "Value": ev.Description}))

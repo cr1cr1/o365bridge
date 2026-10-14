@@ -762,8 +762,27 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 		h.upstreamErr(w, email, err)
 		return
 	}
+	ifMatch := r.Header.Values("If-Match")
 	for _, ex := range existing {
 		if ex.UID == ev.UID || ex.ID == ev.UID {
+			if len(ifMatch) > 0 {
+				if ex.UID == "" {
+					ex.UID = ex.ID
+				}
+				currentTag := etag(ex.ID, generateEventICalendar(ex))
+				matched := false
+				for _, value := range ifMatch {
+					for _, tag := range strings.Split(value, ",") {
+						if tag = strings.TrimSpace(tag); tag == "*" || tag == currentTag {
+							matched = true
+						}
+					}
+				}
+				if !matched {
+					w.WriteHeader(http.StatusPreconditionFailed)
+					return
+				}
+			}
 			ev.ID = ex.ID
 			// RespondEvent choice: when the PUT changes the local
 			// user's PARTSTAT on an event organised by someone else,
@@ -793,6 +812,10 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+	}
+	if len(ifMatch) > 0 {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return
 	}
 	var created bridge.Event
 	if err := h.call(ctx, email, func(c context.Context, p bridge.Provider) error {
