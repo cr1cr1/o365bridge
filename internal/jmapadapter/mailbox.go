@@ -33,7 +33,7 @@ func folderToMailbox(f bridge.Folder) jmail.Mailbox {
 		TotalEmails: f.Total, UnreadEmails: f.Unread,
 		// shortcut: thread counts approximated by email counts
 		TotalThreads: f.Total, UnreadThreads: f.Unread,
-		MyRights:     &jmail.MailboxRights{MayReadItems: true, MayAddItems: true, MayRemoveItems: true, MaySetSeen: true, MaySetKeywords: true, MayCreateChild: true, MayRename: true, MayDelete: true},
+		MyRights:     &jmail.MailboxRights{MayReadItems: true, MayAddItems: true, MayRemoveItems: true, MaySetSeen: true, MaySetKeywords: true, MayCreateChild: true, MayRename: true, MayDelete: true, MaySubmit: true},
 		IsSubscribed: true,
 	}
 }

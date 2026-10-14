@@ -28,7 +28,9 @@ import (
 
 // --- Mailbox (RFC 8621 §2) ---
 
-// MailboxRights is the myRights object of a Mailbox (RFC 8621 §2).
+// MailboxRights is the myRights object of a Mailbox (RFC 8621 §2):
+// exactly nine mayXxx properties. Strict clients fail to decode a
+// Mailbox missing any of them.
 type MailboxRights struct {
 	MayReadItems   bool `json:"mayReadItems"`
 	MayAddItems    bool `json:"mayAddItems"`
@@ -38,6 +40,9 @@ type MailboxRights struct {
 	MayCreateChild bool `json:"mayCreateChild"`
 	MayRename      bool `json:"mayRename"`
 	MayDelete      bool `json:"mayDelete"`
+	// MaySubmit: the user may submit an Email addressed to this
+	// mailbox to be sent (RFC 8621 §2, maySubmit).
+	MaySubmit bool `json:"maySubmit"`
 }
 
 // Mailbox is a folder of emails (RFC 8621 §2).
