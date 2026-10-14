@@ -509,8 +509,8 @@ func TestAppendSynchronizingLiteralWaitsForContinuation(t *testing.T) {
 // Auth failures and operations must be visible in the bridge log
 // per account (a failed login used to leave no trace above debug).
 func TestIMAPAuthFailureAndAppendAreLoggedPerAccount(t *testing.T) {
-	var buf bytes.Buffer
-	logger := zerolog.New(&buf)
+	buf := &lockedBuffer{}
+	logger := zerolog.New(buf)
 	_, ln := startServerWithLogger(t, logger)
 	c := dial(t, ln)
 	bad := c.cmd("a", "LOGIN "+testEmail+" wrong-password")
@@ -539,11 +539,54 @@ func TestIMAPAuthFailureAndAppendAreLoggedPerAccount(t *testing.T) {
 		t.Fatalf("APPEND: %s", joined(resp))
 	}
 	out = buf.String()
-	for _, want := range []string{`"level":"info"`, `"protocol":"imap"`, `"account":"` + testEmail + `"`, `"op":"append"`} {
+	for _, want := range []string{`"level":"info"`, `"protocol":"imap"`, `"account":"` + testEmail + `"`, `"op":"append"`, `"folder_id":"inbox"`, `"item":"appended-1"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("log missing %s: %s", want, out)
 		}
 	}
+}
+
+// A command sent before authentication must be warning-logged
+// (it used to return NO with no trace above debug).
+func TestIMAPUnauthenticatedCommandWarnLogged(t *testing.T) {
+	buf := &lockedBuffer{}
+	_, ln := startServerWithLogger(t, zerolog.New(buf))
+	c := dial(t, ln)
+	resp := c.cmd("a", "SELECT INBOX")
+	if !strings.Contains(joined(resp), "a NO") {
+		t.Fatalf("unauth SELECT: %s", joined(resp))
+	}
+	out := buf.String()
+	for _, want := range []string{`"level":"warn"`, `"protocol":"imap"`, `"op":"select"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %s: %s", want, out)
+		}
+	}
+}
+
+// lockedBuffer is a goroutine-safe log sink (the server logs from
+// connection goroutines while the test reads).
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
 }
 
 // ---------- tests ----------

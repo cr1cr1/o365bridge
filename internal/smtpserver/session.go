@@ -183,6 +183,8 @@ func (s *Server) handleAuth(c net.Conn, r *bufio.Reader, sess *session, arg stri
 	case "":
 		writeLine(c, "501 5.5.4 Authentication mechanism required")
 	default:
+		s.logger.Warn().Str("protocol", "smtp").Str("op", "auth").Str("mech", mech).
+			Str("remote", sess.remote).Msg("smtp unsupported authentication mechanism")
 		writeLine(c, "504 5.5.4 Unrecognised authentication type")
 	}
 }

@@ -135,8 +135,8 @@ func (cl *client) cmd(t *testing.T, format string, args ...any) string {
 // A failed SMTP auth must leave a warning in the bridge log with
 // the account (it used to be debug-only, i.e. invisible).
 func TestSMTPAuthFailureLoggedPerAccount(t *testing.T) {
-	var buf bytes.Buffer
-	addr, done := startWithLogger(t, &fakeProvider{}, zerolog.New(&buf))
+	buf := &lockedBuffer{}
+	addr, done := startWithLogger(t, &fakeProvider{}, zerolog.New(buf))
 	defer done()
 	cl := dial(t, addr)
 	defer cl.c.Close()
@@ -154,6 +154,53 @@ func TestSMTPAuthFailureLoggedPerAccount(t *testing.T) {
 	if strings.Contains(out, "wrong-password") {
 		t.Fatalf("password leaked into log: %s", out)
 	}
+}
+
+// MAIL before AUTH (the "server requires authentication" a client
+// reports) must be warning-logged with the attempted sender, and
+// the session must leave a per-connection trace.
+func TestSMTPMailBeforeAuthWarnLogged(t *testing.T) {
+	buf := &lockedBuffer{}
+	addr, done := startWithLogger(t, &fakeProvider{}, zerolog.New(buf))
+	defer done()
+	cl := dial(t, addr)
+	defer cl.c.Close()
+	cl.cmd(t, "EHLO client.example")
+	r := cl.cmd(t, "MAIL FROM:<user@example.com>")
+	if !strings.HasPrefix(r, "503") {
+		t.Fatalf("MAIL before auth = %q, want 503", r)
+	}
+	out := buf.String()
+	for _, want := range []string{`"level":"warn"`, `"protocol":"smtp"`, `"op":"mail"`, `"from":"user@example.com"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %s: %s", want, out)
+		}
+	}
+}
+
+// lockedBuffer is a goroutine-safe log sink (the server logs from
+// connection goroutines while the test reads).
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
 }
 
 func authPlain(user, pass string) string {

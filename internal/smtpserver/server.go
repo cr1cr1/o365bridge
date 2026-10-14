@@ -127,6 +127,11 @@ func (sess *session) resetTxn() { sess.from, sess.hasFrom, sess.rcpts = "", fals
 func (s *Server) handle(c net.Conn) {
 	r := bufio.NewReader(c)
 	sess := &session{remote: c.RemoteAddr().String()}
+	s.logger.Info().Str("protocol", "smtp").Str("op", "connect").Str("remote", sess.remote).Msg("smtp connection")
+	defer func() {
+		s.logger.Info().Str("protocol", "smtp").Str("op", "disconnect").Str("remote", sess.remote).
+			Str("account", sess.email).Bool("authed", sess.authed).Msg("smtp session end")
+	}()
 	writeLine(c, greeting)
 	for {
 		line, err := readLine(r)
@@ -152,7 +157,9 @@ func (s *Server) handle(c net.Conn) {
 			s.handleAuth(c, r, sess, arg)
 		case "MAIL":
 			if !sess.authed {
-				s.logger.Warn().Str("protocol", "smtp").Str("op", "mail").Str("remote", sess.remote).Msg("smtp MAIL before authentication")
+				from, _ := parsePath(arg, "FROM:")
+				s.logger.Warn().Str("protocol", "smtp").Str("op", "mail").Str("remote", sess.remote).
+					Str("from", from).Msg("smtp MAIL before authentication")
 				writeLine(c, "503 5.5.1 Authentication required")
 				continue
 			}
@@ -194,7 +201,11 @@ func (s *Server) handle(c net.Conn) {
 			// Never confirm/deny account existence in detail.
 			writeLine(c, "252 2.5.2 Cannot VRFY user, send some mail and see")
 		case "STARTTLS":
-			// Plain v1 by design: no TLS listener is offered.
+			// Plain v1 by design: no TLS listener is offered. A
+			// client attempting it is misconfigured (it will fail
+			// to send), so this must be visible as a warning.
+			s.logger.Warn().Str("protocol", "smtp").Str("op", "starttls").Str("remote", sess.remote).
+				Str("account", sess.email).Msg("smtp STARTTLS requested but not offered (plain v1)")
 			writeLine(c, "454 4.7.0 TLS not available")
 		case "QUIT":
 			writeLine(c, "221 2.0.0 "+hostname+" closing connection")

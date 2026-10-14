@@ -150,6 +150,7 @@ type session struct {
 	wmu     sync.Mutex
 	w       *bufio.Writer
 	email   string
+	remote  string
 	cmd     string // current command, for log context
 	idmap   *bridge.IDMap
 	sel     *selected
@@ -199,8 +200,9 @@ func (ss *session) call(op func(context.Context, bridge.Provider) error) error {
 }
 
 func (s *Server) handle(conn net.Conn) {
-	ss := &session{srv: s, conn: conn, r: bufio.NewReader(conn), w: bufio.NewWriter(conn), deleted: map[uint32]bool{}}
+	ss := &session{srv: s, conn: conn, remote: conn.RemoteAddr().String(), r: bufio.NewReader(conn), w: bufio.NewWriter(conn), deleted: map[uint32]bool{}}
 	defer func() { _ = recover() }()
+	s.logger.Info().Str("protocol", "imap").Str("op", "connect").Str("remote", ss.remote).Msg("imap connection")
 	_ = ss.printf("* OK [CAPABILITY %s] o365bridge ready", capability)
 	for {
 		line, lits, err := readCommand(ss.r, ss.w)
@@ -340,6 +342,8 @@ func (ss *session) dispatch(line string, lits [][]byte) bool {
 		_ = ss.tagged(tag, "OK", "NOOP completed")
 	default:
 		if ss.email == "" {
+			ss.srv.logger.Warn().Str("protocol", "imap").Str("op", strings.ToLower(cmdUpper)).
+				Str("remote", ss.remote).Msg("imap command before authentication")
 			_ = ss.tagged(tag, "NO", "not authenticated")
 			return true
 		}
@@ -737,6 +741,8 @@ func (ss *session) cmdSelect(tag, rest string, lits [][]byte, examine bool) {
 		mode = "READ-ONLY"
 		verb = "EXAMINE"
 	}
+	ss.srv.logger.Info().Str("protocol", "imap").Str("op", "select").Str("account", ss.email).
+		Str("folder", display).Str("folder_id", folder.ID).Int("messages", len(ss.sel.msgs)).Msg("imap select")
 	_ = ss.printf("%s OK [%s] %s completed", tag, mode, verb)
 }
 
@@ -919,7 +925,7 @@ func (ss *session) cmdAppend(tag, rest string, lits [][]byte) {
 		return
 	}
 	ss.srv.logger.Info().Str("protocol", "imap").Str("op", "append").Str("account", ss.email).
-		Str("folder", name).Int("size", len(raw)).Msg("imap append")
+		Str("folder", name).Str("folder_id", folder.ID).Str("item", newID).Int("size", len(raw)).Msg("imap append")
 	validity := ss.idmap.UIDValidity(folder.ID)
 	uid, uerr := ss.idmap.UID(folder.ID, newID)
 	if uerr == nil && newID != "" {
