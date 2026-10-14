@@ -65,10 +65,13 @@ disables), `--password` (required, prefer `OB_PASSWORD`),
 ## JMAP
 
 The bridge also serves JMAP (mail, calendars, contacts) on its own
-port, with the same username (your email) and bridge password. It is
-powered by a standalone server-side JMAP library that lives in this
-repository as a nested Go module — see [jmap/README.md](jmap/README.md);
-other projects can implement its backend contracts and reuse it.
+port, with the same username (your email) and bridge password. A
+ready-made client config lives at
+[examples/himalaya/config.toml](examples/himalaya/config.toml). The
+surface is powered by a standalone server-side JMAP library that
+lives in this repository as a nested Go module — see
+[jmap/README.md](jmap/README.md); other projects can implement its
+backend contracts and reuse it.
 
 Two bridge-specific limits, stated plainly: uploaded blobs live in
 memory only (gone on restart, 32 MiB per account), and change

@@ -1,0 +1,69 @@
+# ================================================================================
+# himalaya configuration for o365bridge
+#
+# Copy to $XDG_CONFIG_HOME/himalaya/config.toml (or ~/.config/himalaya/config.toml),
+# or run `himalaya -c /path/to/this/file ...` directly.
+#
+# Prerequisites:
+#   1. Build and start the bridge:
+#        go build -o bin/o365bridge .
+#        OB_PASSWORD='choose-a-bridge-password' ./bin/o365bridge serve
+#      IMAP listens on 127.0.0.1:1143, SMTP on 127.0.0.1:1025, JMAP on
+#      127.0.0.1:8080 (all configurable: --imap-port, --smtp-port, --jmap-port).
+#   2. Replace every "you@example.com" below with your Outlook 365 address and
+#      every "bridge-password" with your OB_PASSWORD value. The username IS the
+#      account selector: the first connection opens the bridge's Chromium window
+#      for that account's Microsoft login.
+#
+# Everything here is loopback and cleartext by design — the bridge serves plain
+# protocols on 127.0.0.1 (no TLS, no STARTTLS). Keep it that way; nothing but
+# localhost should ever see these ports.
+# ================================================================================
+
+[accounts.o365bridge]
+default = true
+# Address this account sends as, and the account the bridge selects on login.
+email = "you@example.com"
+
+# --- JMAP backend (recommended) -----------------------------------------------
+# The bridge's JMAP surface serves mail (and calendars/contacts) straight from
+# Outlook, with server-side roles, search and change tracking.
+#
+# A bare authority is discovered through GET /.well-known/jmap; pointing at the
+# session endpoint directly works too:
+#   jmap.server = "http://127.0.0.1:8080/jmap/session"
+jmap.server = "http://127.0.0.1:8080"
+jmap.auth.basic.username = "you@example.com"
+jmap.auth.basic.password.raw = "bridge-password"
+# Prefer a password manager over a raw secret:
+#jmap.auth.basic.password.command = "pass show o365bridge"
+
+# --- IMAP + SMTP backend (alternative) -----------------------------------------
+# Uncomment to use the classic protocol pair instead of (or alongside) JMAP.
+# When several backends are configured, pick one per command with --backend.
+#
+#imap.server = "imap://127.0.0.1:1143"
+#imap.sasl.plain.username = "you@example.com"
+#imap.sasl.plain.password.raw = "bridge-password"
+#
+#smtp.server = "smtp://127.0.0.1:1025"
+#smtp.sasl.plain.username = "you@example.com"
+#smtp.sasl.plain.password.raw = "bridge-password"
+
+# --- Notes ----------------------------------------------------------------------
+# Sent copies: leave `message.send.save-copy` unset. The bridge's upstream send
+# already files the message in Sent Items; a client-side copy would duplicate it.
+#
+# Mailbox aliases: the JMAP backend reports mailbox roles itself, so none are
+# needed. The IMAP backend needs them only if himalaya cannot discover your
+# upstream folder names:
+#   mailbox.alias.sent = "Sent Items"
+#   mailbox.alias.drafts = "Drafts"
+#   mailbox.alias.trash = "Deleted Items"
+#
+# More accounts: add one [accounts.<name>] section per Outlook 365 account, each
+# with its own email as the username and the same bridge password. Accounts are
+# isolated from each other; switch with himalaya -a <name>.
+#
+# Scheduled sends are not supported by the bridge: a `message send` with a future
+# date is rejected upstream rather than sent early.
