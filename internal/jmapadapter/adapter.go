@@ -68,9 +68,12 @@ func NewEngine(reg *bridge.Registry, instancePassword string, logger zerolog.Log
 // NewHandler builds the full bridge JMAP HTTP surface: the engine's
 // REST handler plus the RFC 8887 WebSocket transport mounted at the
 // engine's WebSocket path, with the websocket capability advertised.
+// shortcut: the capability's url is empty because the bridge serves
+// loopback without a configured base URL — clients use the absolute
+// Session.WebSocketURL the engine builds from the request host.
 func NewHandler(reg *bridge.Registry, instancePassword string, logger zerolog.Logger) http.Handler {
 	eng, _ := NewEngine(reg, instancePassword, logger)
-	eng.RegisterCapability(jmap.WebSocketURI, struct{}{}, struct{}{})
+	eng.RegisterCapability(jmap.WebSocketURI, ws.Capability{SupportsPush: true}, struct{}{})
 	mux := http.NewServeMux()
 	mux.Handle("/jmap/ws/", ws.New(eng))
 	mux.Handle("/", eng.Handler())

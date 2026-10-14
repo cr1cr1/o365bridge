@@ -7,20 +7,20 @@
 //
 //	mux.Handle("/jmap/ws/", ws.New(engine))
 //
-// The host should advertise this endpoint in the Session object as the
-// RFC 8887 "webSocketUrl" property. Note: the jmap.Session type in the
-// root package has no WebSocketURL field, so this package cannot set it;
-// that advertisement remains the host's (or a future root-type change's)
-// job. The RFC 8887 capability URI is urn:ietf:params:jmap:websocket
-// (jmap.WebSocketURI), which the host may register on the engine.
+// and advertise the endpoint by registering the RFC 8887 §3
+// capability on the engine:
 //
-// Protocol (RFC 8887): after the WebSocket handshake (subprotocol
-// "jmap"), client and server exchange JSON text messages discriminated
-// by "@type". A client sends {"@type":"Request", ...} (a JMAP request
-// object) and receives {"@type":"Response", ...}; the server pushes
-// {"@type":"StateChange", ...} objects once push is enabled on the
-// socket (see the shortcut note on WebSocketPushSubscription handling
-// in conn.handleMessage).
+//	eng.RegisterCapability(jmap.WebSocketURI, ws.Capability{
+//	    URL: "ws://host/jmap/ws/", SupportsPush: true,
+//	}, struct{}{})
+//
+// (the engine then also sets Session.WebSocketURL). Protocol
+// (RFC 8887): after the handshake (subprotocol "jmap"), client and
+// server exchange JSON text messages discriminated by "@type":
+// Request (with optional id) → Response (echoing requestId),
+// request-level failures as RequestError objects (§4.3.4), and
+// StateChange pushes once enabled via WebSocketPushEnable (honouring
+// dataTypes) until WebSocketPushDisable (§4.3.5).
 package ws
 
 import (
@@ -67,6 +67,15 @@ const (
 // Handler returns an http.Handler serving JMAP over WebSocket for e.
 // It is an alias for New.
 func Handler(e *server.Engine) http.Handler { return New(e) }
+
+// Capability is the RFC 8887 §3 "urn:ietf:params:jmap:websocket"
+// capability object: the WebSocket URL endpoint and whether push
+// notifications over the WebSocket are supported. Hosts register it
+// on the engine so the Session advertises it.
+type Capability struct {
+	URL          string `json:"url"`
+	SupportsPush bool   `json:"supportsPush"`
+}
 
 // New returns a path-agnostic http.Handler that authenticates the
 // upgrade request with e.AuthenticateRequest (401 before upgrade on
@@ -198,10 +207,13 @@ type conn struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// push state, only touched by the read goroutine.
+	// push state, only touched by the read goroutine (the filter map
+	// is published before push goroutines start and never mutated
+	// after; re-enable replaces it before any new goroutine reads it).
 	pushCtx     context.Context
 	pushCancel  context.CancelFunc
 	pushCancels []func()
+	pushFilter  map[string]bool
 }
 
 func (c *conn) shutdown() {
@@ -432,22 +444,29 @@ func (c *conn) flushClose() {
 
 type wireRequest struct {
 	Type string `json:"@type"`
+	// ID is the optional client identifier (RFC 8887 §4.3.2), echoed
+	// as requestId on the Response (§4.3.3).
+	ID string `json:"id,omitempty"`
 	jmap.Request
 }
 
 type wireResponse struct {
 	Type            string              `json:"@type"`
+	RequestID       string              `json:"requestId,omitempty"`
 	MethodResponses []*jmap.Invocation  `json:"methodResponses"`
 	CreatedIDs      map[jmap.ID]jmap.ID `json:"createdIds,omitempty"`
 	SessionState    string              `json:"sessionState"`
 }
 
-type wireProblem struct {
-	Type   string `json:"@type"`
-	Status int    `json:"status"`
-	Detail string `json:"detail,omitempty"`
-	// Error type URN when this mirrors an RFC 8620 request problem.
-	ProblemType string `json:"type,omitempty"`
+// wireRequestError is the request-level error object of RFC 8887
+// §4.3.4: the RFC 8620 §3.6.1 Problem Details object extended with
+// @type "RequestError" and the optional requestId.
+type wireRequestError struct {
+	Type        string `json:"@type"` // "RequestError"
+	Status      int    `json:"status"`
+	ProblemType string `json:"type,omitempty"` // RFC 8620 problem URN
+	Detail      string `json:"detail,omitempty"`
+	RequestID   string `json:"requestId,omitempty"`
 }
 
 func (c *conn) sendJSON(v any) {
@@ -458,8 +477,9 @@ func (c *conn) sendJSON(v any) {
 	c.enqueue(opText, data)
 }
 
-func (c *conn) sendProblem(status int, detail string) {
-	c.sendJSON(wireProblem{Type: "Problem", Status: status, Detail: detail})
+// sendRequestError emits an RFC 8887 §4.3.4 RequestError object.
+func (c *conn) sendRequestError(status int, detail, requestID string) {
+	c.sendJSON(wireRequestError{Type: "RequestError", Status: status, Detail: detail, RequestID: requestID})
 }
 
 func (c *conn) handleMessage(data []byte) {
@@ -467,59 +487,72 @@ func (c *conn) handleMessage(data []byte) {
 		Type string `json:"@type"`
 	}
 	if err := json.Unmarshal(data, &head); err != nil {
-		c.sendProblem(http.StatusBadRequest, "message is not JSON")
+		c.sendRequestError(http.StatusBadRequest, "message is not JSON", "")
 		return
 	}
 	switch head.Type {
 	case "Request":
 		var wr wireRequest
 		if err := json.Unmarshal(data, &wr); err != nil {
-			c.sendProblem(http.StatusBadRequest, "invalid Request object")
+			c.sendRequestError(http.StatusBadRequest, "invalid Request object", "")
 			return
 		}
 		req := wr.Request
 		resp := c.e.Process(c.ctx, c.p, &req)
 		if resp == nil {
-			// shortcut: request-level problems (unknown capability,
-			// limits, not-a-request) collapse to a generic Problem
-			// over WebSocket rather than echoing the exact RFC 8620
-			// §3.6.1 problem type URN.
-			c.sendProblem(http.StatusBadRequest, "invalid JMAP request")
+			// RFC 8887 §4.3.4: request-level failures are
+			// RequestError objects. The engine's exact RFC 8620
+			// problem URN is not retained across transports, so the
+			// generic bad-request status is sent.
+			c.sendRequestError(http.StatusBadRequest, "invalid JMAP request", wr.ID)
 			return
 		}
 		c.sendJSON(wireResponse{
 			Type:            "Response",
+			RequestID:       wr.ID,
 			MethodResponses: resp.MethodResponses,
 			CreatedIDs:      resp.CreatedIDs,
 			SessionState:    resp.SessionState,
 		})
-	case "WebSocketPushSubscription":
-		// shortcut: RFC 8887 §4 push enablement — we accept and ignore
-		// all fields of the WebSocketPushSubscription object and treat
-		// it as "enable StateChange pushes for every account of the
-		// principal on this socket". Pushes are OFF until this message
-		// arrives. (Per-account/type filtering fields, if any were
-		// sent, are not honoured.)
-		c.enablePush()
+	case "WebSocketPushEnable":
+		// RFC 8887 §4.3.5.2: enable StateChange pushes for this
+		// connection, optionally filtered by data type names.
+		// shortcut: the optional pushState token is not supported
+		// (no server-wide state token exists); a client relying on
+		// it must resync via /changes after reconnecting.
+		var en struct {
+			DataTypes []string `json:"dataTypes"`
+		}
+		_ = json.Unmarshal(data, &en)
+		c.enablePush(en.DataTypes)
+	case "WebSocketPushDisable":
+		// RFC 8887 §4.3.5.3: stop pushing on this connection.
+		c.disablePush()
 	default:
-		// shortcut: unknown @type gets a simple Problem object rather
-		// than a fully-typed RFC 8887 problem detail.
-		c.sendProblem(http.StatusBadRequest, fmt.Sprintf("unknown @type %q", head.Type))
+		c.sendRequestError(http.StatusBadRequest, fmt.Sprintf("unknown @type %q", head.Type), "")
 	}
 }
 
 // enablePush subscribes to StateChanges for every account of the
-// principal and forwards them to this socket. Idempotent.
-func (c *conn) enablePush() {
+// principal and forwards them to this socket, filtered by dataTypes
+// (nil/empty = all types). Re-enabling just replaces the filter.
+func (c *conn) enablePush(dataTypes []string) {
+	filter := map[string]bool{}
+	for _, t := range dataTypes {
+		filter[t] = true
+	}
 	if c.pushCtx != nil {
+		c.pushFilter = filter
 		return
 	}
 	ctx, cancel := context.WithCancel(c.ctx)
 	c.pushCtx = ctx
 	c.pushCancel = cancel
+	c.pushFilter = filter
 	for accountID := range c.p.Accounts {
 		ch, unsub := c.e.SubscribeStateChanges(ctx, accountID)
 		c.pushCancels = append(c.pushCancels, unsub)
+		f := filter // each generation of goroutines keeps its own filter
 		c.wg.Add(1)
 		go func(ch <-chan server.StateChange) {
 			defer c.wg.Done()
@@ -533,6 +566,9 @@ func (c *conn) enablePush() {
 					if !ok {
 						return
 					}
+					if !pushWanted(f, sc) {
+						continue
+					}
 					data, err := json.Marshal(sc) // {"@type":"StateChange","changed":{...}}
 					if err != nil {
 						continue
@@ -544,4 +580,36 @@ func (c *conn) enablePush() {
 			}
 		}(ch)
 	}
+}
+
+// pushWanted reports whether any type inside the StateChange passes
+// the dataTypes filter of RFC 8887 §4.3.5.2 (nil/empty = all types).
+func pushWanted(filter map[string]bool, sc server.StateChange) bool {
+	if len(filter) == 0 {
+		return true
+	}
+	for _, types := range sc.Changed {
+		for t := range types {
+			if filter[t] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// disablePush stops StateChange forwarding (RFC 8887 §4.3.5.3). The
+// filter field is left stale on purpose: in-flight goroutines of the
+// disabled generation read their own captured copy and exit via the
+// cancelled context.
+func (c *conn) disablePush() {
+	if c.pushCancel != nil {
+		c.pushCancel()
+		c.pushCancel = nil
+	}
+	c.pushCtx = nil
+	for _, f := range c.pushCancels {
+		f()
+	}
+	c.pushCancels = nil
 }

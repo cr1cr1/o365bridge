@@ -519,6 +519,28 @@ func (e *Engine) serveSession(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, &jmap.Problem{Type: "about:blank", Status: http.StatusInternalServerError, Detail: err.Error()})
 		return
 	}
+	// RFC 8620 §2: the session URLs are absolute. When no BaseURL is
+	// configured, absolutize them from the request's Host so clients
+	// discovering the server via /.well-known/jmap on any host:port
+	// get usable URLs.
+	if e.opts.BaseURL == "" {
+		host := r.Host
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		base := scheme + "://" + host
+		s.APIURL = base + s.APIURL
+		s.DownloadURL = base + s.DownloadURL
+		s.UploadURL = base + s.UploadURL
+		s.EventSourceURL = base + s.EventSourceURL
+		if s.WebSocketURL != "" {
+			s.WebSocketURL = "ws://" + host + s.WebSocketURL
+			if scheme == "https" {
+				s.WebSocketURL = "wss://" + host + strings.TrimPrefix(s.WebSocketURL, "ws://")
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, s)
 }
 

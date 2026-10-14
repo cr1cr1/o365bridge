@@ -113,10 +113,12 @@ type Email struct {
 
 	// S/MIME properties (RFC 9219 §4). All nullable/omitempty so
 	// non-S/MIME backends omit them entirely; values are supplied
-	// by the backend and passed through verbatim.
-	SMimeStatus     *SMimeStatus `json:"smimeStatus,omitempty"`
-	SMimeErrors     []string     `json:"smimeErrors,omitempty"`
-	SMimeVerifiedAt *time.Time   `json:"smimeVerifiedAt,omitempty"`
+	// by the backend and passed through verbatim. The status
+	// vocabulary lives on SMimeStatus in mdn.go.
+	SMimeStatus           *SMimeStatus `json:"smimeStatus,omitempty"`
+	SMimeStatusAtDelivery *SMimeStatus `json:"smimeStatusAtDelivery,omitempty"`
+	SMimeErrors           []string     `json:"smimeErrors,omitempty"`
+	SMimeVerifiedAt       *time.Time   `json:"smimeVerifiedAt,omitempty"`
 
 	HasAttachment bool                  `json:"hasAttachment"`
 	Preview       string                `json:"preview"`

@@ -375,6 +375,19 @@ All four phases are implemented and committed:
   `maxChanges` paging losing records, moves trashing the original
   (now a real provider move), silent immutable-property drops in
   `Email/set`, and unbounded full-MIME `Email/query` scans.
+- A conformance pass against the normative RFC texts then corrected
+  the generated shapes: MDN/send is the RFC 9007 §2.1 batch method
+  (`send: Id[MDN]` → `sent`/`notSent`, per-record error types
+  including `mdnAlreadySent`, mandatory `onSuccessUpdateEmail`
+  `$mdnsent` enforcement) with `MDN/parse` added; the S/MIME
+  capability is `urn:ietf:params:jmap:smimeverify` with the RFC 9219
+  §4 status vocabulary and `smimeStatusAtDelivery`; RFC 8887 push
+  uses `WebSocketPushEnable`/`WebSocketPushDisable` honouring
+  `dataTypes`, requests echo `id` as `requestId`, request-level
+  errors are `RequestError` objects, and the websocket capability
+  carries `url`/`supportsPush`. With no configured base URL the
+  engine now absolutizes all session URLs from the request host, as
+  RFC 8620 §2 requires.
 - Still owner-run live gates: a real JMAP client (Himalaya) against
   a real Microsoft account; the library is otherwise covered by
   spec-derived tests in both modules.
