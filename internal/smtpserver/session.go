@@ -56,7 +56,13 @@ func argOr(s, def string) string {
 }
 
 // parsePath parses "FROM:<a@b> [params]" / "TO:<a@b>".
+// The empty reverse-path "FROM:<>" is legal (bounce messages,
+// RFC 5321 §3.3) and accepted for MAIL; never for RCPT.
 func parsePath(arg, prefix string) (string, bool) {
+	return parsePathAllow(arg, prefix, false)
+}
+
+func parsePathAllow(arg, prefix string, allowEmpty bool) (string, bool) {
 	if len(arg) < len(prefix) || !strings.EqualFold(arg[:len(prefix)], prefix) {
 		return "", false
 	}
@@ -69,6 +75,9 @@ func parsePath(arg, prefix string) (string, bool) {
 		return "", false
 	}
 	addr := rest[1:end]
+	if addr == "" && allowEmpty {
+		return "", true
+	}
 	// Reject params smuggled inside brackets / empty / no @ / spaces.
 	if addr == "" || strings.ContainsAny(addr, " \t<>") || !strings.Contains(addr, "@") {
 		return "", false

@@ -143,6 +143,11 @@ func (s *Server) handle(c net.Conn) {
 			continue
 		}
 		cmd, arg := splitCmd(line)
+		// Every command verb is visible per session (never its
+		// argument: AUTH carries credentials).
+		s.logger.Info().Str("protocol", "smtp").Str("op", "command").Str("command", cmd).
+			Str("remote", sess.remote).Str("account", sess.email).Bool("authed", sess.authed).
+			Msg("smtp command")
 		switch cmd {
 		case "EHLO":
 			sess.resetTxn()
@@ -168,7 +173,7 @@ func (s *Server) handle(c net.Conn) {
 				writeLine(c, "530 5.7.0 Authentication required")
 				continue
 			}
-			addr, ok := parsePath(arg, "FROM:")
+			addr, ok := parsePathAllow(arg, "FROM:", true)
 			if !ok {
 				writeLine(c, "501 5.1.7 Bad sender address syntax")
 				continue

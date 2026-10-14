@@ -352,6 +352,31 @@ func TestSMTPFullSendDeliversExactMIME(t *testing.T) {
 	cl.cmd(t, "QUIT")
 }
 
+// RFC 5321: the empty reverse-path MAIL FROM:<> is legal (bounce
+// messages) and must be accepted; and every command in a session
+// must be visible in the log per connection.
+func TestSMTPEmptyReversePathAndCommandLog(t *testing.T) {
+	buf := &lockedBuffer{}
+	prov := &fakeProvider{}
+	addr, done := startWithLogger(t, prov, zerolog.New(buf))
+	defer done()
+	cl := dial(t, addr)
+	defer cl.c.Close()
+	cl.cmd(t, "EHLO client.example")
+	if r := cl.cmd(t, "AUTH PLAIN %s", authPlain(acct, pw)); !strings.HasPrefix(r, "235") {
+		t.Fatalf("auth = %q", r)
+	}
+	if r := cl.cmd(t, "MAIL FROM:<>"); !strings.HasPrefix(r, "250") {
+		t.Fatalf("MAIL FROM:<> = %q, want 250 (empty reverse-path is legal)", r)
+	}
+	out := buf.String()
+	for _, want := range []string{`"command":"EHLO"`, `"command":"AUTH"`, `"command":"MAIL"`, `"account":"` + acct + `"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %s: %s", want, out)
+		}
+	}
+}
+
 func TestSMTPUpstreamErrorGives451(t *testing.T) {
 	prov := &fakeProvider{sendErr: bridge.TransientError("upstream down")}
 	addr, done := start(t, prov)
