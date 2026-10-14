@@ -18,6 +18,7 @@ import (
 	"github.com/cr1cr1/o365bridge/jmap/datatype"
 	"github.com/cr1cr1/o365bridge/jmap/mail"
 	"github.com/cr1cr1/o365bridge/jmap/server"
+	"github.com/cr1cr1/o365bridge/jmap/ws"
 	"github.com/rs/zerolog"
 
 	"github.com/cr1cr1/o365bridge/internal/bridge"
@@ -54,6 +55,18 @@ func NewEngine(reg *bridge.Registry, instancePassword string, logger zerolog.Log
 	b.SetEngine(eng)
 	mail.Register(eng, b)
 	return eng, b
+}
+
+// NewHandler builds the full bridge JMAP HTTP surface: the engine's
+// REST handler plus the RFC 8887 WebSocket transport mounted at the
+// engine's WebSocket path, with the websocket capability advertised.
+func NewHandler(reg *bridge.Registry, instancePassword string, logger zerolog.Logger) http.Handler {
+	eng, _ := NewEngine(reg, instancePassword, logger)
+	eng.RegisterCapability(jmap.WebSocketURI, struct{}{}, struct{}{})
+	mux := http.NewServeMux()
+	mux.Handle("/jmap/ws/", ws.New(eng))
+	mux.Handle("/", eng.Handler())
+	return mux
 }
 
 // SetEngine records the engine for Publish and wires the journal publisher.

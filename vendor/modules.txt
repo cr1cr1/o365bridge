@@ -7,6 +7,7 @@ github.com/cr1cr1/o365bridge/jmap
 github.com/cr1cr1/o365bridge/jmap/datatype
 github.com/cr1cr1/o365bridge/jmap/mail
 github.com/cr1cr1/o365bridge/jmap/server
+github.com/cr1cr1/o365bridge/jmap/ws
 # github.com/go-rod/rod v0.116.2
 ## explicit; go 1.21
 github.com/go-rod/rod

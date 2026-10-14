@@ -111,6 +111,13 @@ type Email struct {
 	Subject    string         `json:"subject"`
 	SentAt     *time.Time     `json:"sentAt"`
 
+	// S/MIME properties (RFC 9219 §4). All nullable/omitempty so
+	// non-S/MIME backends omit them entirely; values are supplied
+	// by the backend and passed through verbatim.
+	SMimeStatus     *SMimeStatus `json:"smimeStatus,omitempty"`
+	SMimeErrors     []string     `json:"smimeErrors,omitempty"`
+	SMimeVerifiedAt *time.Time   `json:"smimeVerifiedAt,omitempty"`
+
 	HasAttachment bool                  `json:"hasAttachment"`
 	Preview       string                `json:"preview"`
 	BodyValues    map[string]*BodyValue `json:"bodyValues"`
@@ -194,6 +201,11 @@ func Register(e *server.Engine, b Backend) {
 	// The required Backend interface above is unchanged, so existing
 	// backends are unaffected.
 	registerMail2(e, b)
+
+	// Phase 3a (MDN RFC 9007, S/MIME RFC 9219): each registered only
+	// when the backend implements its optional interface
+	// (MDNBackend, SMimeBackend).
+	registerPhase3a(e, b)
 }
 
 type threadGetResponse struct {

@@ -140,6 +140,10 @@ type Options struct {
 	UploadPath      string // default "/jmap/upload/{accountId}"
 	DownloadPath    string // default "/jmap/download/{accountId}/{blobId}/{name}"
 	EventSourcePath string // default "/jmap/eventsource/"
+	// WebSocketPath is only used to build Session.WebSocketURL when
+	// the host registers the WebSocket capability and mounts a
+	// WebSocket handler (e.g. jmap/ws) at this path.
+	WebSocketPath string // default "/jmap/ws/"
 	// BaseURL is prepended to the paths to form the absolute URLs in
 	// the Session object (no trailing slash). Empty means relative.
 	BaseURL string
@@ -285,6 +289,9 @@ func New(auth Authenticator, opts Options) *Engine {
 	if opts.EventSourcePath == "" {
 		opts.EventSourcePath = "/jmap/eventsource/"
 	}
+	if opts.WebSocketPath == "" {
+		opts.WebSocketPath = "/jmap/ws/"
+	}
 	opts.BaseURL = strings.TrimRight(opts.BaseURL, "/")
 	if opts.SessionState == "" {
 		opts.SessionState = "0" // shortcut: constant session state
@@ -386,15 +393,11 @@ func (e *Engine) authenticate(w http.ResponseWriter, r *http.Request) *Principal
 		writeProblem(w, &jmap.Problem{Type: "about:blank", Status: http.StatusUnauthorized, Detail: "no authenticator configured"})
 		return nil
 	}
-	p, err := e.auth.Authenticate(r.Context(), r)
-	if err != nil || p == nil {
+	p, err := e.AuthenticateRequest(r.Context(), r)
+	if err != nil {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeProblem(w, &jmap.Problem{Type: "about:blank", Status: http.StatusUnauthorized, Detail: "unauthorized"})
 		return nil
-	}
-	if p.Accounts == nil {
-		p = clonePrincipal(p)
-		p.Accounts = map[jmap.ID]*jmap.Account{}
 	}
 	return p
 }
@@ -402,6 +405,19 @@ func (e *Engine) authenticate(w http.ResponseWriter, r *http.Request) *Principal
 func clonePrincipal(p *Principal) *Principal {
 	cp := *p
 	return &cp
+}
+
+// wsBase converts an http(s) BaseURL to its ws(s) equivalent for
+// the Session webSocketUrl; a relative BaseURL stays relative.
+func wsBase(base string) string {
+	switch {
+	case strings.HasPrefix(base, "https://"):
+		return "wss://" + strings.TrimPrefix(base, "https://")
+	case strings.HasPrefix(base, "http://"):
+		return "ws://" + strings.TrimPrefix(base, "http://")
+	default:
+		return base
+	}
 }
 
 // buildSession renders the Session object for p from the registered
@@ -424,6 +440,11 @@ func (e *Engine) buildSession(p *Principal) (*jmap.Session, error) {
 		UploadURL:       e.opts.BaseURL + e.opts.UploadPath,
 		EventSourceURL:  e.eventSourceURL(),
 		State:           e.opts.SessionState,
+	}
+	if _, ok := caps[jmap.WebSocketURI]; ok {
+		// RFC 8887: advertise the WebSocket endpoint when the host
+		// registered the capability (and mounts the handler).
+		s.WebSocketURL = wsBase(e.opts.BaseURL) + e.opts.WebSocketPath
 	}
 	if s.PrimaryAccounts == nil {
 		s.PrimaryAccounts = map[jmap.URI]jmap.ID{}

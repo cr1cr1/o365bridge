@@ -106,6 +106,9 @@ type Session struct {
 	DownloadURL     string                  `json:"downloadUrl"`
 	UploadURL       string                  `json:"uploadUrl"`
 	EventSourceURL  string                  `json:"eventSourceUrl"`
+	// WebSocketURL is present only when the server offers JMAP over
+	// WebSocket (RFC 8887); omitted otherwise.
+	WebSocketURL string `json:"webSocketUrl,omitempty"`
 	// State changes whenever any other property of the Session
 	// changes; it is echoed as sessionState in every Response (§3.4).
 	State string `json:"state"`

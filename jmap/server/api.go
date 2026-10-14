@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,46 +41,19 @@ func (e *Engine) serveAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req jmap.Request
-	if err := json.Unmarshal(body, &req); err != nil || req.Using == nil || req.MethodCalls == nil {
+	if err := json.Unmarshal(body, &req); err != nil {
 		writeProblem(w, &jmap.Problem{Type: jmap.ProblemNotRequest, Status: http.StatusBadRequest, Detail: "request body is not a JMAP request object"})
 		return
 	}
-	for _, u := range req.Using {
-		if !e.knownCapability(u) {
-			writeProblem(w, &jmap.Problem{Type: jmap.ProblemUnknownCapability, Status: http.StatusBadRequest, Detail: "unknown capability: " + string(u)})
-			return
-		}
-	}
-	if uint64(len(req.MethodCalls)) > e.core.MaxCallsInRequest {
-		writeProblem(w, &jmap.Problem{Type: jmap.ProblemLimit, Status: http.StatusBadRequest, Limit: "maxCallsInRequest"})
+	resp, prob := e.process(r.Context(), p, &req)
+	if prob != nil {
+		writeProblem(w, prob)
 		return
-	}
-
-	using := make(map[jmap.URI]bool, len(req.Using))
-	for _, u := range req.Using {
-		using[u] = true
-	}
-	created := make(map[jmap.ID]jmap.ID, len(req.CreatedIDs))
-	for k, v := range req.CreatedIDs {
-		created[k] = v
-	}
-	haveCreated := len(created) > 0
-
-	resp := &jmap.Response{MethodResponses: []*jmap.Invocation{}, SessionState: e.opts.SessionState}
-	prev := make(map[string]*jmap.Invocation) // callID -> response invocation
-
-	for _, inv := range req.MethodCalls {
-		out := e.dispatchOne(r, p, inv, using, prev, created)
-		resp.MethodResponses = append(resp.MethodResponses, out)
-		prev[inv.CallID] = out
-	}
-	if len(created) > 0 || haveCreated {
-		resp.CreatedIDs = created
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (e *Engine) dispatchOne(r *http.Request, p *Principal, inv *jmap.Invocation, using map[jmap.URI]bool, prev map[string]*jmap.Invocation, created map[jmap.ID]jmap.ID) (out *jmap.Invocation) {
+func (e *Engine) dispatchOne(ctx context.Context, p *Principal, inv *jmap.Invocation, using map[jmap.URI]bool, prev map[string]*jmap.Invocation, created map[jmap.ID]jmap.ID) (out *jmap.Invocation) {
 	args, err := resolveResultReferences(inv.Args, prev)
 	if err != nil {
 		return jmap.NewInvalidResultReference(err.Error()).Invocation(inv.CallID)
@@ -106,7 +80,7 @@ func (e *Engine) dispatchOne(r *http.Request, p *Principal, inv *jmap.Invocation
 			out = jmap.NewServerFail(fmt.Sprintf("panic in %s: %v", inv.Name, rec)).Invocation(inv.CallID)
 		}
 	}()
-	res, herr := entry.handler(r.Context(), call)
+	res, herr := entry.handler(ctx, call)
 	for k, v := range call.Created {
 		created[k] = v
 	}

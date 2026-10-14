@@ -120,9 +120,8 @@ func (s *ServeCmd) Run(d *Deps) error {
 	}
 	var jmapSrv *http.Server
 	if s.JmapPort != 0 {
-		engine, _ := jmapadapter.NewEngine(reg, s.Password, log.Logger)
 		jmapSrv = &http.Server{
-			Handler:           engine.Handler(),
+			Handler:           jmapadapter.NewHandler(reg, s.Password, log.Logger),
 			ReadHeaderTimeout: 30 * time.Second,
 		}
 	}
