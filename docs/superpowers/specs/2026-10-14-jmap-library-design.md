@@ -344,6 +344,41 @@ Per phase, acceptance tests first (the repository's ATDD rule):
   operations; the same data reachable over CalDAV/CardDAV and JMAP
   stays consistent because both read the same upstream live.
 
+## Implementation status (as built)
+
+All four phases are implemented and committed:
+
+- **Library** (`jmap/` module, stdlib only): root wire types;
+  `server` engine (session/discovery, dispatch with result-reference
+  and creation-id resolution, blobs, EventSource, PushSubscription
+  storage + async delivery, exported `Process`/`AuthenticateRequest`/
+  `SubscribeStateChanges` for transports); `datatype` generic
+  get/set/query/changes machinery with enforced object limits and
+  `Memory[T]`; `mail` (RFC 8621 complete method coverage, MDN
+  RFC 9007, S/MIME RFC 9219 properties); `ws` (RFC 8887, hand-rolled
+  RFC 6455); `quota` (RFC 9425); `sharing` (RFC 9670 principals);
+  `calendars` (JSCalendar); `contacts` (JSContact). Session objects
+  advertise `webSocketUrl` when the host registers the websocket
+  capability.
+- **Bridge dogfood** (`internal/jmapadapter`, `--jmap-port` default
+  8080): Basic auth into Registry hold-and-wait login; Mailbox/Email
+  stores over the live provider (folder-encoded email IDs, MIME
+  parsing, a metadata-only `Email/query` fast path), per-account
+  `jmap-journal.json` answering `Email/changes` with version:offset
+  paging and feeding push, ephemeral blob store, Identity,
+  EmailSubmission (sends immediately; future `sendAt` is rejected),
+  import/copy/parse/snippets; calendars and contacts mapped onto the
+  provider with live-hash state and the `cannotCalculateChanges`
+  fallback; WebSocket mounted at `/jmap/ws/`.
+- A review pass after implementation fixed, among others: false
+  "destroyed" reports after transient fetch failures, journal
+  `maxChanges` paging losing records, moves trashing the original
+  (now a real provider move), silent immutable-property drops in
+  `Email/set`, and unbounded full-MIME `Email/query` scans.
+- Still owner-run live gates: a real JMAP client (Himalaya) against
+  a real Microsoft account; the library is otherwise covered by
+  spec-derived tests in both modules.
+
 ## Known risks, stated plainly
 
 - **`/changes` honesty.** The journal only knows what the bridge has

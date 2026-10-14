@@ -58,6 +58,7 @@ func (e *Engine) dispatchOne(ctx context.Context, p *Principal, inv *jmap.Invoca
 	if err != nil {
 		return jmap.NewInvalidResultReference(err.Error()).Invocation(inv.CallID)
 	}
+	args = resolveCreationReferences(args, created)
 	e.mu.RLock()
 	entry, ok := e.methods[inv.Name]
 	e.mu.RUnlock()
@@ -149,6 +150,75 @@ func resolveResultReferences(args json.RawMessage, prev map[string]*jmap.Invocat
 		return args, nil
 	}
 	return json.Marshal(obj)
+}
+
+// resolveCreationReferences replaces any JSON string value exactly
+// equal to "#<creationId>" (anywhere nested in objects/arrays) with the
+// server id recorded for that creation id, per RFC 8620 §3.3/§5.3
+// creation-id references. Only string values are considered: keys
+// (including "#"-prefixed result-reference keys, already handled by
+// resolveResultReferences) are never touched, and unknown "#..."
+// strings are left untouched. Original bytes are returned unchanged
+// when nothing matches.
+func resolveCreationReferences(args json.RawMessage, created map[jmap.ID]jmap.ID) json.RawMessage {
+	if len(args) == 0 || len(created) == 0 {
+		return args
+	}
+	dec := json.NewDecoder(strings.NewReader(string(args)))
+	dec.UseNumber()
+	var doc any
+	if err := dec.Decode(&doc); err != nil {
+		return args
+	}
+	if !substituteCreationRefs(doc, created) {
+		return args
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return args
+	}
+	return out
+}
+
+func substituteCreationRefs(v any, created map[jmap.ID]jmap.ID) bool {
+	changed := false
+	switch cur := v.(type) {
+	case map[string]any:
+		for k, el := range cur {
+			if s, ok := el.(string); ok {
+				if id, hit := lookupCreationRef(s, created); hit {
+					cur[k] = string(id)
+					changed = true
+				}
+				continue
+			}
+			if substituteCreationRefs(el, created) {
+				changed = true
+			}
+		}
+	case []any:
+		for i, el := range cur {
+			if s, ok := el.(string); ok {
+				if id, hit := lookupCreationRef(s, created); hit {
+					cur[i] = string(id)
+					changed = true
+				}
+				continue
+			}
+			if substituteCreationRefs(el, created) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func lookupCreationRef(s string, created map[jmap.ID]jmap.ID) (jmap.ID, bool) {
+	if !strings.HasPrefix(s, "#") || len(s) == 1 {
+		return "", false
+	}
+	id, ok := created[jmap.ID(s[1:])]
+	return id, ok
 }
 
 func lookupReference(ref jmap.ResultReference, prev map[string]*jmap.Invocation) (any, error) {

@@ -292,7 +292,9 @@ func TestWidgetLifecycleOverHTTP(t *testing.T) {
 	_ = json.Unmarshal(args["created"], &chCreated)
 	_ = json.Unmarshal(args["updated"], &chUpdated)
 	_ = json.Unmarshal(args["destroyed"], &chDestroyed)
-	if len(chCreated) != 2 || len(chUpdated) != 2 || len(chDestroyed) != 1 || chDestroyed[0] != id2 {
+	// Coalesced: id1 created-then-updated is created only;
+	// id2 created-then-destroyed appears in no list.
+	if len(chCreated) != 1 || chCreated[0] != id1 || len(chUpdated) != 0 || len(chDestroyed) != 0 {
 		t.Fatalf("changes created=%v updated=%v destroyed=%v", chCreated, chUpdated, chDestroyed)
 	}
 	if string(args["hasMoreChanges"]) != "false" {

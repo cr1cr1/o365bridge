@@ -56,6 +56,10 @@ func NewEngine(reg *bridge.Registry, instancePassword string, logger zerolog.Log
 	eng := server.New(auth, server.Options{Blobs: b.blobs})
 	b.SetEngine(eng)
 	mail.Register(eng, b)
+	// Replace the generic Email/query (which builds every Email in
+	// full, MIME included) with the metadata-only handler in query.go.
+	// RegisterMethod overwrites the existing registration.
+	eng.RegisterMethod("Email/query", jmap.MailURI, b.emailQuery)
 	calendars.Register(eng, b)
 	contacts.Register(eng, b)
 	return eng, b

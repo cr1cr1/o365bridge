@@ -81,13 +81,24 @@ func (s *submissionStore) Get(_ context.Context, account jmap.ID, ids []jmap.ID)
 }
 
 func (s *submissionStore) Create(ctx context.Context, account jmap.ID, obj jmail.EmailSubmission) (jmail.EmailSubmission, *jmap.SetError) {
+	// Validation first: none of these cases may send.
+	if obj.SendAt != nil && obj.SendAt.After(time.Now().Add(time.Minute)) {
+		return jmail.EmailSubmission{}, &jmap.SetError{Type: "invalidProperties", Properties: []string{"sendAt"}, Description: "scheduled sending is not supported yet"}
+	}
+	// The sole identity's id is the account email (see identityStore).
+	if obj.IdentityID != "" && obj.IdentityID != account {
+		return jmail.EmailSubmission{}, &jmap.SetError{Type: "invalidProperties", Properties: []string{"identityId"}, Description: "unknown identity"}
+	}
+	if obj.Envelope != nil && obj.Envelope.MailFrom.Email != "" && obj.Envelope.MailFrom.Email != string(account) {
+		return jmail.EmailSubmission{}, &jmap.SetError{Type: "invalidProperties", Properties: []string{"envelope"}, Description: "envelope mailFrom must be the account email"}
+	}
 	folderID, upstreamID, err := decodeEmailID(obj.EmailID)
 	if err != nil {
 		return jmail.EmailSubmission{}, &jmap.SetError{Type: "invalidProperties", Properties: []string{"emailId"}, Description: "emailId must be a message id"}
 	}
 	// Build email for ThreadID (also verifies existence)
 	estore := &emailStore{s.b}
-	em, berr := estore.buildOne(ctx, account, folderID, upstreamID)
+	em, _, berr := estore.buildOne(ctx, account, folderID, upstreamID)
 	if berr != nil {
 		return jmail.EmailSubmission{}, &jmap.SetError{Type: "notFound", Description: berr.Error()}
 	}
@@ -199,7 +210,7 @@ func (b *Backend) ImportEmail(ctx context.Context, account jmap.ID, blobID jmap.
 		return jmail.Email{}, &jmap.SetError{Type: "serverFail", Description: err.Error()}
 	}
 	estore := &emailStore{b}
-	em, err := estore.buildOne(ctx, account, string(folder), newID)
+	em, _, err := estore.buildOne(ctx, account, string(folder), newID)
 	if err != nil {
 		id := encodeEmailID(string(folder), newID)
 		return jmail.Email{ID: id, BlobID: id}, nil
@@ -216,7 +227,7 @@ func (b *Backend) CopyEmail(ctx context.Context, fromAccount, toAccount jmap.ID,
 	}
 	// Source email (for its mailboxIds) + MIME via source account
 	estore := &emailStore{b}
-	srcEmail, berr := estore.buildOne(ctx, fromAccount, folderID, upstreamID)
+	srcEmail, _, berr := estore.buildOne(ctx, fromAccount, folderID, upstreamID)
 	if berr != nil {
 		return jmail.Email{}, &jmap.SetError{Type: "notFound", Description: berr.Error()}
 	}
@@ -274,7 +285,7 @@ func (b *Backend) CopyEmail(ctx context.Context, fromAccount, toAccount jmap.ID,
 			return p.CopyMessages(ctx, first, []string{newID}, string(dest))
 		})
 	}
-	em, err2 := estore.buildOne(ctx, toAccount, first, newID)
+	em, _, err2 := estore.buildOne(ctx, toAccount, first, newID)
 	if err2 != nil {
 		eid := encodeEmailID(first, newID)
 		return jmail.Email{ID: eid, BlobID: eid}, nil

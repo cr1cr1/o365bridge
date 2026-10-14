@@ -180,6 +180,15 @@ func (m *Memory[T]) Changes(_ context.Context, account jmap.ID, sinceState strin
 	}
 	newState = strconv.FormatUint(a.counter, 10)
 	count := 0
+	// Coalesce journal entries per id within the consumed window:
+	// created-then-updated stays created only, created-then-destroyed
+	// vanishes from all lists, updated-then-destroyed becomes destroyed
+	// only, repeated updates collapse to one, and destroyed (and the
+	// created-then-destroyed "gone" state) is terminal. First-seen
+	// order is preserved within each resulting list.
+	const gone = "gone"
+	final := map[jmap.ID]string{}
+	var order []jmap.ID
 	for _, e := range a.journal {
 		if e.counter <= since {
 			continue
@@ -188,17 +197,37 @@ func (m *Memory[T]) Changes(_ context.Context, account jmap.ID, sinceState strin
 			hasMore = true
 			break
 		}
-		switch e.kind {
-		case "created":
-			created = append(created, e.id)
-		case "updated":
-			updated = append(updated, e.id)
-		case "destroyed":
-			destroyed = append(destroyed, e.id)
+		cur, seen := final[e.id]
+		if !seen {
+			order = append(order, e.id)
+			final[e.id] = e.kind
+		} else {
+			switch cur {
+			case "created":
+				if e.kind == "destroyed" {
+					final[e.id] = gone
+				} // created-then-updated (or re-created) stays created
+			case "updated":
+				if e.kind == "destroyed" {
+					final[e.id] = "destroyed"
+				} // repeated updates stay a single updated
+			case "destroyed", gone:
+				// terminal: later entries do not resurrect the id
+			}
 		}
 		count++
 		if maxChanges > 0 && count >= maxChanges {
 			newState = strconv.FormatUint(e.counter, 10)
+		}
+	}
+	for _, id := range order {
+		switch final[id] {
+		case "created":
+			created = append(created, id)
+		case "updated":
+			updated = append(updated, id)
+		case "destroyed":
+			destroyed = append(destroyed, id)
 		}
 	}
 	if hasMore {

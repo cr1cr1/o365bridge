@@ -58,6 +58,14 @@ func (e *Engine) publishBus(sc StateChange) {
 // stored PushSubscription of the affected account(s) (RFC 8620 §7.1):
 // one POST per subscription endpoint, retried twice with small backoff,
 // then reported to Options.OnPushError if set.
+//
+// The internal bus fan-out is synchronous, but PushSubscription POST
+// deliveries never block Publish's caller: each subscription's
+// delivery runs in its own goroutine. Goroutine count per Publish is
+// therefore bounded by the number of subscriptions of the affected
+// account(s) (the deliveries started by that one Publish), not by
+// publish rate over time — each goroutine exits when its delivery
+// (with retries) finishes.
 func (e *Engine) Publish(sc StateChange) {
 	e.publishBus(sc)
 	if e.opts.Subscriptions == nil {
@@ -85,9 +93,14 @@ func (e *Engine) Publish(sc StateChange) {
 			if sub.Expires != nil && time.Now().After(*sub.Expires) {
 				continue // expired subscription: not delivered to
 			}
-			if err := e.postWithRetry(ctx, sub.URL, sc); err != nil {
-				e.pushError(sub, err)
-			}
+			// Deliver concurrently per subscription so a slow or
+			// dead endpoint cannot block Publish's caller (or the
+			// other subscriptions).
+			go func(sub *PushSubscription) {
+				if err := e.postWithRetry(ctx, sub.URL, sc); err != nil {
+					e.pushError(sub, err)
+				}
+			}(sub)
 		}
 	}
 }

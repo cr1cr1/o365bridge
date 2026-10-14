@@ -25,8 +25,10 @@ func (s *emailStore) State(_ context.Context, account jmap.ID) (string, error) {
 	return s.b.Journal.State(string(account)), nil
 }
 
-// buildOne fetches meta+MIME for a single message and builds the Email, observing the journal (non-full).
-func (s *emailStore) buildOne(ctx context.Context, account jmap.ID, folderID, upstreamID string) (jmail.Email, error) {
+// buildOne fetches meta+MIME for a single message and builds the Email.
+// It has NO journal side effect; callers that represent a genuine
+// observation (single-id Get, full listing) Observe explicitly.
+func (s *emailStore) buildOne(ctx context.Context, account jmap.ID, folderID, upstreamID string) (jmail.Email, Witness, error) {
 	var meta bridge.MessageMeta
 	var raw []byte
 	err := s.b.call(ctx, string(account), "GetMessage", func(ctx context.Context, p bridge.Provider) error {
@@ -45,11 +47,10 @@ func (s *emailStore) buildOne(ctx context.Context, account jmap.ID, folderID, up
 		return err
 	})
 	if err != nil {
-		return jmail.Email{}, err
+		return jmail.Email{}, Witness{}, err
 	}
 	em := buildEmail(meta, raw)
-	s.b.Journal.Observe(string(account), []Witness{{ID: string(em.ID), Folder: meta.FolderID, Hash: emailHash(meta)}}, false)
-	return em, nil
+	return em, Witness{ID: string(em.ID), Folder: meta.FolderID, Hash: emailHash(meta)}, nil
 }
 
 func (s *emailStore) Get(ctx context.Context, account jmap.ID, ids []jmap.ID) ([]jmail.Email, []jmap.ID, error) {
@@ -65,6 +66,7 @@ func (s *emailStore) Get(ctx context.Context, account jmap.ID, ids []jmap.ID) ([
 		}
 		var out []jmail.Email
 		var witnesses []Witness
+		incomplete := false
 		for _, f := range folders {
 			offset := 0
 			for {
@@ -81,13 +83,16 @@ func (s *emailStore) Get(ctx context.Context, account jmap.ID, ids []jmap.ID) ([
 					if meta.FolderID == "" {
 						meta.FolderID = f.ID
 					}
-					em, err := s.buildOne(ctx, account, meta.FolderID, meta.ID)
+					em, w, err := s.buildOne(ctx, account, meta.FolderID, meta.ID)
 					if err != nil {
-						continue // skip unreadable message
+						// Unreadable message: the listing is incomplete, so
+						// it must not be treated as a full witness set —
+						// otherwise this message would look destroyed.
+						incomplete = true
+						continue
 					}
-					// buildOne observed singly; collect for full observe below (dedupe by journal logic)
 					out = append(out, em)
-					witnesses = append(witnesses, Witness{ID: string(em.ID), Folder: meta.FolderID, Hash: emailHash(meta)})
+					witnesses = append(witnesses, w)
 				}
 				offset += len(metas)
 				if len(metas) == 0 || offset >= total {
@@ -95,7 +100,8 @@ func (s *emailStore) Get(ctx context.Context, account jmap.ID, ids []jmap.ID) ([
 				}
 			}
 		}
-		s.b.Journal.Observe(string(account), witnesses, true)
+		// Single Observe for the whole listing; full only when complete.
+		s.b.Journal.Observe(string(account), witnesses, !incomplete)
 		if out == nil {
 			out = []jmail.Email{}
 		}
@@ -103,18 +109,23 @@ func (s *emailStore) Get(ctx context.Context, account jmap.ID, ids []jmap.ID) ([
 	}
 	var found []jmail.Email
 	var notFound []jmap.ID
+	var witnesses []Witness
 	for _, id := range ids {
 		folderID, upstreamID, err := decodeEmailID(id)
 		if err != nil {
 			notFound = append(notFound, id)
 			continue
 		}
-		em, err := s.buildOne(ctx, account, folderID, upstreamID)
+		em, w, err := s.buildOne(ctx, account, folderID, upstreamID)
 		if err != nil {
 			notFound = append(notFound, id)
 			continue
 		}
 		found = append(found, em)
+		witnesses = append(witnesses, w)
+	}
+	if len(witnesses) > 0 {
+		s.b.Journal.Observe(string(account), witnesses, false)
 	}
 	return found, notFound, nil
 }
@@ -313,6 +324,59 @@ func mailboxIDsList(m map[jmap.ID]bool) []jmap.ID {
 	return out
 }
 
+func addrEmailsEqual(a, b []jmail.EmailAddress) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Email != b[i].Email {
+			return false
+		}
+	}
+	return true
+}
+
+func timePtrEqual(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
+// immutableDiffs lists JSON property names of immutable Email fields
+// that differ between the patched object and the current one.
+func immutableDiffs(obj, cur jmail.Email) []string {
+	var props []string
+	if obj.Subject != cur.Subject {
+		props = append(props, "subject")
+	}
+	if !addrEmailsEqual(obj.From, cur.From) {
+		props = append(props, "from")
+	}
+	if !addrEmailsEqual(obj.To, cur.To) {
+		props = append(props, "to")
+	}
+	if !addrEmailsEqual(obj.Cc, cur.Cc) {
+		props = append(props, "cc")
+	}
+	if !addrEmailsEqual(obj.Bcc, cur.Bcc) {
+		props = append(props, "bcc")
+	}
+	if obj.ThreadID != cur.ThreadID {
+		props = append(props, "threadId")
+	}
+	if obj.BlobID != cur.BlobID {
+		props = append(props, "blobId")
+	}
+	if !obj.ReceivedAt.Equal(cur.ReceivedAt) {
+		props = append(props, "receivedAt")
+	}
+	if !timePtrEqual(obj.SentAt, cur.SentAt) {
+		props = append(props, "sentAt")
+	}
+	return props
+}
+
 func (s *emailStore) Create(ctx context.Context, account jmap.ID, obj jmail.Email) (jmail.Email, *jmap.SetError) {
 	folders := mailboxIDsList(obj.MailboxIDs)
 	if len(folders) == 0 {
@@ -346,7 +410,7 @@ func (s *emailStore) Create(ctx context.Context, account jmap.ID, obj jmail.Emai
 			return p.CopyMessages(ctx, first, []string{newID}, string(dest))
 		})
 	}
-	em, err := s.buildOne(ctx, account, first, newID)
+	em, _, err := s.buildOne(ctx, account, first, newID)
 	if err != nil {
 		return jmail.Email{ID: encodeEmailID(first, newID), BlobID: encodeEmailID(first, newID)}, nil
 	}
@@ -366,6 +430,12 @@ func (s *emailStore) Update(ctx context.Context, account jmap.ID, obj jmail.Emai
 		return nil, &jmap.SetError{Type: "notFound"}
 	}
 	cur := found[0]
+	// Immutable fields: any difference fails the whole record
+	// atomically (before keywords/mailboxes are applied). Size and
+	// Preview are server-set and ignored.
+	if props := immutableDiffs(obj, cur); len(props) > 0 {
+		return nil, &jmap.SetError{Type: "invalidProperties", Properties: props}
+	}
 	// Keyword diff
 	var addFlags, removeFlags bridge.Flags
 	for k, v := range obj.Keywords {
@@ -403,9 +473,6 @@ func (s *emailStore) Update(ctx context.Context, account jmap.ID, obj jmail.Emai
 	hasKwChange := len(addFlags) > 0 || len(removeFlags) > 0
 	hasMboxChange := len(added) > 0 || len(removed) > 0
 	if !hasKwChange && !hasMboxChange {
-		if obj.Subject != cur.Subject {
-			return nil, &jmap.SetError{Type: "invalidProperties", Properties: []string{"subject"}}
-		}
 		return nil, nil
 	}
 	// Apply keyword changes
@@ -415,6 +482,20 @@ func (s *emailStore) Update(ctx context.Context, account jmap.ID, obj jmail.Emai
 		}); err != nil {
 			return nil, &jmap.SetError{Type: "serverFail", Description: err.Error()}
 		}
+	}
+	// A pure move (exactly one folder removed, exactly one added, and
+	// the message lives only in the removed folder) uses MoveMessages
+	// once — Copy+Delete would trash the original. Note the upstream
+	// ID may change after a move; the JMAP id encodes the folder, so
+	// the caller learns the new id on the next get/query.
+	isMove := len(removed) == 1 && len(added) == 1 && len(curFolders) == 1 && curFolders[0] == removed[0]
+	if isMove {
+		if err := s.b.call(ctx, string(account), "MoveMessages", func(ctx context.Context, p bridge.Provider) error {
+			return p.MoveMessages(ctx, string(removed[0]), []string{upstreamID}, string(added[0]))
+		}); err != nil {
+			return nil, &jmap.SetError{Type: "serverFail", Description: err.Error()}
+		}
+		return nil, nil
 	}
 	// Copy to added folders from an existing folder
 	if len(added) > 0 {
@@ -436,8 +517,9 @@ func (s *emailStore) Update(ctx context.Context, account jmap.ID, obj jmail.Emai
 			}
 		}
 	}
-	// Removed folders: DeleteMessages trashes rather than removes folder membership;
-	// shortcut: a move therefore can change the JMAP id since id encodes folder.
+	// Removals that are not part of a single move still use
+	// DeleteMessages (documented: upstream trashes rather than merely
+	// removing folder membership).
 	for _, f := range removed {
 		if err := s.b.call(ctx, string(account), "DeleteMessages", func(ctx context.Context, p bridge.Provider) error {
 			return p.DeleteMessages(ctx, string(f), []string{upstreamID})

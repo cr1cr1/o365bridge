@@ -54,6 +54,16 @@ type QueryChangesStore[T any] interface {
 	QueryChanges(ctx context.Context, account jmap.ID, args jmap.QueryChangesArgs) (*jmap.QueryChangesResponse, error)
 }
 
+// Advertised core limits enforced by the generic handlers. These
+// mirror the engine's advertised default core capability values
+// (server.New defaults MaxObjectsInGet/MaxObjectsInSet to 500);
+// RFC 8620 §5.1/§5.2 permits the server to return requestTooLarge
+// when a client exceeds the advertised maximum.
+const (
+	MaxObjectsInGet = 500
+	MaxObjectsInSet = 500
+)
+
 // ErrCannotCalculate is returned by ChangeStore.Changes (and may be
 // returned, wrapped, by QueryChangesStore.QueryChanges) when the
 // backend cannot list changes since the given state. Register turns
@@ -147,6 +157,9 @@ func (h *handlers[T]) get(ctx context.Context, call *server.Call) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(args.IDs) > MaxObjectsInGet {
+		return nil, jmap.NewRequestTooLarge(fmt.Sprintf("too many ids in /get: %d > %d", len(args.IDs), MaxObjectsInGet))
+	}
 	found, notFound, err := h.opts.Store.Get(ctx, account, args.IDs)
 	if err != nil {
 		return nil, err
@@ -223,6 +236,9 @@ func (h *handlers[T]) set(ctx context.Context, call *server.Call) (any, error) {
 	account, err := accountAndDecode[T](call, &args)
 	if err != nil {
 		return nil, err
+	}
+	if n := len(args.Create) + len(args.Update) + len(args.Destroy); n > MaxObjectsInSet {
+		return nil, jmap.NewRequestTooLarge(fmt.Sprintf("too many objects in /set: %d > %d", n, MaxObjectsInSet))
 	}
 	store := h.opts.Store
 	oldState, err := store.State(ctx, account)

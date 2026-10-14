@@ -223,6 +223,15 @@ func emailMatch(e Email, filter json.RawMessage) (bool, error) {
 	return evalFilter(e, filter, emailCond)
 }
 
+// EmailMatch reports whether e matches a /query filter (the raw
+// FilterCondition/FilterOperator JSON). An empty or "null" filter
+// matches everything. It is the exported form of the Match hook used
+// by Register, for callers implementing their own Email/query handler
+// (e.g. over light, metadata-only Email values).
+func EmailMatch(obj Email, filter json.RawMessage) (bool, error) {
+	return emailMatch(obj, filter)
+}
+
 func emailCond(e Email, raw json.RawMessage) (bool, error) {
 	if err := checkKeys(raw, emailCondKeys); err != nil {
 		return false, err
@@ -386,6 +395,14 @@ func addrSearch(list []EmailAddress, q string) bool {
 		}
 	}
 	return false
+}
+
+// EmailCompare orders a and b ascending by c.Property, returning
+// ok == false when the property is unsupported. It is the exported
+// form of the Compare hook used by Register (see EmailMatch); the
+// caller applies Comparator.IsAscending.
+func EmailCompare(a, b Email, c jmap.Comparator) (int, bool) {
+	return emailCompare(a, b, c)
 }
 
 // emailCompare orders ascending by comparator.Property (nil sentAt

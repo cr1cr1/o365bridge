@@ -29,6 +29,7 @@ exactly like a normal account:
 | IMAP server / port     | `127.0.0.1` / `1143`, no TLS (v1)      |
 | SMTP server / port     | `127.0.0.1` / `1025`, no TLS (v1)      |
 | CalDAV / CardDAV       | `http://127.0.0.1:1080/caldav/` and `/carddav/` |
+| JMAP                   | `http://127.0.0.1:8080/jmap/session` (discovery: `/.well-known/jmap`) |
 
 The first time a client connects with an email the bridge has never
 seen, the bridge opens its own controlled Chromium window (via
@@ -56,9 +57,27 @@ o365bridge serve --help
 ```
 
 Key flags: `--interface` (default `127.0.0.1`), `--imap-port` (1143),
-`--smtp-port` (1025), `--dav-port` (1080), `--password` (required,
-prefer `OB_PASSWORD`), `--graph-client-id` (empty = Graph disabled,
-OWA only), `--state-dir`, `--browser-path`. There is no config file.
+`--smtp-port` (1025), `--dav-port` (1080), `--jmap-port` (8080, 0
+disables), `--password` (required, prefer `OB_PASSWORD`),
+`--graph-client-id` (empty = Graph disabled, OWA only), `--state-dir`,
+`--browser-path`. There is no config file.
+
+## JMAP
+
+The bridge also serves JMAP (mail, calendars, contacts) on its own
+port, with the same username (your email) and bridge password. It is
+powered by a standalone server-side JMAP library that lives in this
+repository as a nested Go module — see [jmap/README.md](jmap/README.md);
+other projects can implement its backend contracts and reuse it.
+
+Two bridge-specific limits, stated plainly: uploaded blobs live in
+memory only (gone on restart, 32 MiB per account), and change
+tracking (`Email/changes`, push) is based on a small per-account
+journal of message IDs and hashes recording what the bridge has
+personally witnessed — asking about anything older returns the
+spec's `cannotCalculateChanges` and the client resyncs. Calendar and
+contact changes currently use that same fallback beyond the current
+state.
 
 ## Graph (optional)
 

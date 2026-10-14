@@ -249,6 +249,11 @@ func (c *conn) writer() {
 		case <-c.done:
 			return
 		case f := <-c.out:
+			// Bound each frame write so a non-reading client cannot
+			// wedge the writer (and, via a full out queue, every
+			// enqueue caller) forever. On error/timeout shutdown
+			// closes the connection, unblocking enqueue via done.
+			_ = c.nc.SetWriteDeadline(time.Now().Add(30 * time.Second))
 			if err := writeFrame(c.nc, f.op, f.payload); err != nil {
 				c.shutdown()
 				return
