@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -22,6 +23,12 @@ import (
 const capability = "IMAP4rev1 IDLE MOVE UIDPLUS NAMESPACE UNSELECT"
 
 type Server struct {
+	// Configure TLS before Serve. Nil preserves plaintext; StartTLS selects upgrade mode.
+	TLSConfig *tls.Config
+	StartTLS  bool
+	// TLSHandshakeTimeout bounds handshakes. Default 10s.
+	TLSHandshakeTimeout time.Duration
+
 	// IdlePollInterval is the IDLE/NOOP poll period. Default 10s.
 	IdlePollInterval time.Duration
 
@@ -67,6 +74,11 @@ func (s *Server) Serve(l net.Listener) error {
 			return err
 		}
 		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			_ = conn.Close()
+			return nil
+		}
 		s.conns[conn] = struct{}{}
 		s.wg.Add(1)
 		s.mu.Unlock()
@@ -146,6 +158,7 @@ type selected struct {
 type session struct {
 	srv     *Server
 	conn    net.Conn
+	secure  bool
 	r       *bufio.Reader
 	wmu     sync.Mutex
 	w       *bufio.Writer
@@ -201,11 +214,15 @@ func (ss *session) call(op func(context.Context, bridge.Provider) error) error {
 
 func (s *Server) handle(conn net.Conn) {
 	ss := &session{srv: s, conn: conn, remote: conn.RemoteAddr().String(), r: bufio.NewReader(conn), w: bufio.NewWriter(conn), deleted: map[uint32]bool{}}
+	defer func() { _ = ss.conn.Close() }()
 	defer func() { _ = recover() }()
 	s.logger.Info().Str("protocol", "imap").Str("op", "connect").Str("remote", ss.remote).Msg("imap connection")
-	_ = ss.printf("* OK [CAPABILITY %s] o365bridge ready", capability)
+	if s.TLSConfig != nil && !s.StartTLS && !ss.handshakeTLS() {
+		return
+	}
+	_ = ss.printf("* OK [CAPABILITY %s] o365bridge ready", ss.capabilities())
 	for {
-		line, lits, err := readCommand(ss.r, ss.w)
+		line, lits, err := ss.readCommand()
 		if err != nil {
 			return
 		}
@@ -218,13 +235,73 @@ func (s *Server) handle(conn net.Conn) {
 	}
 }
 
+func (ss *session) requiresTLS() bool {
+	return ss.srv.TLSConfig != nil && ss.srv.StartTLS && !ss.secure
+}
+
+func (ss *session) capabilities() string {
+	if ss.requiresTLS() {
+		return capability + " STARTTLS LOGINDISABLED"
+	}
+	if ss.secure {
+		return capability + " AUTH=PLAIN"
+	}
+	return capability
+}
+
+func (ss *session) cmdStartTLS(tag, rest string) bool {
+	if strings.TrimSpace(rest) != "" {
+		_ = ss.tagged(tag, "BAD", "STARTTLS takes no arguments")
+		return true
+	}
+	if !ss.requiresTLS() || ss.email != "" {
+		_ = ss.tagged(tag, "BAD", "STARTTLS unavailable in this state")
+		return true
+	}
+	// Never carry plaintext read-ahead across the TLS boundary.
+	if ss.r.Buffered() != 0 {
+		_ = ss.tagged(tag, "BAD", "STARTTLS cannot be pipelined")
+		return false
+	}
+	if err := ss.tagged(tag, "OK", "Begin TLS negotiation"); err != nil {
+		return false
+	}
+	return ss.handshakeTLS()
+}
+
+func (ss *session) handshakeTLS() bool {
+	timeout := ss.srv.TLSHandshakeTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	conn := tls.Server(ss.conn, ss.srv.TLSConfig)
+	err := conn.SetDeadline(time.Now().Add(timeout))
+	if err == nil {
+		err = conn.Handshake()
+	}
+	if err == nil {
+		err = conn.SetDeadline(time.Time{})
+	}
+	if err != nil {
+		ss.srv.logger.Warn().Err(err).Str("protocol", "imap").Str("op", "tls").
+			Str("remote", ss.remote).Msg("imap TLS handshake failed")
+		return false
+	}
+	ss.conn = conn
+	ss.r = bufio.NewReader(conn)
+	ss.w = bufio.NewWriter(conn)
+	ss.secure = true
+	return true
+}
+
 // readCommand reads one logical IMAP command, expanding literals.
 // A synchronizing literal ({n} without '+') requires the server to
 // send a continuation request before the client sends the data —
 // without it, real clients (Thunderbird APPEND) wait forever while
 // the server waits for bytes: a deadlock. Non-synchronizing
 // literals ({n+}) need no continuation.
-func readCommand(r *bufio.Reader, w *bufio.Writer) (string, [][]byte, error) {
+func (ss *session) readCommand() (string, [][]byte, error) {
+	r, w := ss.r, ss.w
 	var full strings.Builder
 	var lits [][]byte
 	for {
@@ -240,6 +317,15 @@ func readCommand(r *bufio.Reader, w *bufio.Writer) (string, [][]byte, error) {
 			}
 		}
 		trimmed := strings.TrimRight(seg, "\r\n")
+		if full.Len() == 0 {
+			_, rest := splitFirst(trimmed)
+			cmd, _ := splitFirst(rest)
+			cmdUpper := strings.ToUpper(cmd)
+			// Match dispatch's normalization before soliciting any literal data.
+			if cmdUpper == "STARTTLS" || (ss.requiresTLS() && (cmdUpper == "LOGIN" || cmdUpper == "AUTHENTICATE")) {
+				return trimmed, nil, nil
+			}
+		}
 		if idx, n, sync, ok := literalSuffix(trimmed); ok {
 			if sync {
 				if _, err := w.WriteString("+ Ready for literal data\r\n"); err != nil {
@@ -323,9 +409,18 @@ func (ss *session) dispatch(line string, lits [][]byte) bool {
 	ss.cmd = cmdUpper
 	ss.srv.logger.Debug().Str("cmd", cmdUpper).Bool("auth", ss.email != "").Msg("imap command")
 
+	if ss.requiresTLS() && (cmdUpper == "LOGIN" || cmdUpper == "AUTHENTICATE") {
+		_ = ss.tagged(tag, "NO", "[PRIVACYREQUIRED] TLS is required before authentication")
+		// A literal's unread payload cannot safely be treated as the next command.
+		_, _, _, literal := literalSuffix(rest)
+		return !literal
+	}
+
 	switch cmdUpper {
+	case "STARTTLS":
+		return ss.cmdStartTLS(tag, rest)
 	case "CAPABILITY":
-		_ = ss.printf("* CAPABILITY %s", capability)
+		_ = ss.printf("* CAPABILITY %s", ss.capabilities())
 		_ = ss.tagged(tag, "OK", "CAPABILITY completed")
 	case "LOGOUT":
 		_ = ss.printf("* BYE o365bridge logging out")
@@ -443,7 +538,7 @@ func (ss *session) cmdLogin(tag, rest string, lits [][]byte) {
 		return
 	}
 	ss.logAuth(user, true)
-	_ = ss.printf("%s OK [CAPABILITY %s] LOGIN completed", tag, capability)
+	_ = ss.printf("%s OK [CAPABILITY %s] LOGIN completed", tag, ss.capabilities())
 }
 
 func (ss *session) cmdAuthenticate(tag, rest string, lits [][]byte) bool {
@@ -498,7 +593,7 @@ func (ss *session) cmdAuthenticate(tag, rest string, lits [][]byte) bool {
 		return true
 	}
 	ss.logAuth(user, true)
-	_ = ss.printf("%s OK [CAPABILITY %s] AUTHENTICATE completed", tag, capability)
+	_ = ss.printf("%s OK [CAPABILITY %s] AUTHENTICATE completed", tag, ss.capabilities())
 	return true
 }
 
