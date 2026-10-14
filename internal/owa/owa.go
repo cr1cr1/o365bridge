@@ -130,10 +130,28 @@ func (p *provider) call(ctx context.Context, action string, payload any) (any, e
 	if body, ok := raw["Body"]; ok {
 		result = body
 	}
-	if m, ok := result.(map[string]any); ok {
-		if items := arr(m, "ResponseMessages", "Items"); len(items) == 1 {
-			result = items[0]
+	messages := arr(result, "ResponseMessages", "Items")
+	if len(messages) == 0 {
+		messages = []any{result}
+	}
+	// Native service errors may arrive with HTTP 200 and no MessageText.
+	// Validate every response before unwrapping, so a batch cannot partly succeed.
+	for _, message := range messages {
+		code, class := str(message, "ResponseCode"), str(message, "ResponseClass")
+		if class == "Error" || (code != "" && code != "NoError") {
+			detail := code
+			if detail == "" {
+				detail = "native service error"
+			}
+			if text := str(message, "MessageText"); text != "" {
+				detail += ": " + text
+			}
+			p.logUpstream(zerolog.WarnLevel, action, resp.StatusCode, dur, detail)
+			return nil, fmt.Errorf("owa: %s: %s", action, detail)
 		}
+	}
+	if items := arr(result, "ResponseMessages", "Items"); len(items) == 1 {
+		result = items[0]
 	}
 	if m, ok := result.(map[string]any); ok {
 		if mt := str(m, "MessageText"); mt != "" {

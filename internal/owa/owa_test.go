@@ -413,9 +413,12 @@ func TestCreateCalendarEvent(t *testing.T) {
 
 func TestListTasksMapping(t *testing.T) {
 	_, p := newFake(t, func(action string, body map[string]any) any {
-		return okBody(map[string]any{"RootFolder": map[string]any{"Items": []any{
-			map[string]any{"ItemId": map[string]any{"Id": "t1"}, "Subject": "Do it", "DueDate": "2024-06-01T00:00:00Z", "PercentComplete": float64(50), "Importance": "High"},
-		}, "TotalItemsInView": float64(1)}})
+		if action == "FindItem" {
+			return okBody(map[string]any{"RootFolder": map[string]any{"Items": []any{
+				map[string]any{"ItemId": map[string]any{"Id": "t1"}},
+			}, "TotalItemsInView": float64(1)}})
+		}
+		return itemResp(map[string]any{"ItemId": map[string]any{"Id": "t1"}, "Subject": "Do it", "DueDate": "2024-06-01T00:00:00Z", "PercentComplete": float64(50), "Importance": "High"})
 	})
 	tasks, err := p.ListTasks(context.Background(), "tasks")
 	if err != nil {

@@ -10,9 +10,8 @@ import (
 	"github.com/cr1cr1/o365bridge/internal/bridge"
 )
 
-// ListCalendars/ListTaskLists: _o has no enumeration call; it uses the
-// distinguished "calendar"/"tasks" folders. We discover folders via
-// FindFolder and fall back to the distinguished folder.
+// Calendar discovery falls back to the distinguished calendar folder.
+// Tasks keep the stable distinguished collection in ListTaskLists below.
 func (p *provider) listCollections(ctx context.Context, class, distID, name string, tasksOnly bool) ([]bridge.Calendar, error) {
 	folders, err := p.ListFolders(ctx)
 	if err == nil {
@@ -36,7 +35,9 @@ func (p *provider) ListCalendars(ctx context.Context) ([]bridge.Calendar, error)
 	return p.listCollections(ctx, "IPF.Appointment", "calendar", "Calendar", false)
 }
 func (p *provider) ListTaskLists(ctx context.Context) ([]bridge.Calendar, error) {
-	return p.listCollections(ctx, "IPF.Task", "tasks", "Tasks", true)
+	// Preserve the established DAV collection URL independently of opaque folder IDs.
+	// shortcut: only the default task list is exposed; custom lists need verified default-folder identity resolution.
+	return []bridge.Calendar{{ID: "tasks", Name: "Tasks", TasksOnly: true}}, nil
 }
 
 // --- events ---
@@ -459,10 +460,25 @@ func (p *provider) FreeBusy(ctx context.Context, emails []string, from, to time.
 
 // --- tasks ---
 
+const taskUIDPropertyName = "O365BridgeTaskUID"
+
+func taskUIDField() map[string]any {
+	return map[string]any{"DistinguishedPropertySetId": "PublicStrings", "PropertyName": taskUIDPropertyName, "PropertyType": "String"}
+}
+
 func taskFromItem(item map[string]any, listID string) bridge.Task {
 	t := bridge.Task{
 		ID: str(item, "ItemId", "Id"), ListID: listID, Title: str(item, "Subject"),
-		Body: bodyText(item), UID: str(item, "UID"),
+		Body: bodyText(item),
+	}
+	// Tasks have no native iCalendar UID; keep client identity in a named property.
+	for _, property := range arr(item, "ExtendedProperty") {
+		field := dig(property, "ExtendedFieldURI")
+		publicStrings := str(field, "DistinguishedPropertySetId") == "PublicStrings" || strings.EqualFold(str(field, "PropertySetId"), "00020329-0000-0000-C000-000000000046")
+		if publicStrings && str(field, "PropertyName") == taskUIDPropertyName && str(field, "PropertyType") == "String" {
+			t.UID = str(property, "Value")
+			break
+		}
 	}
 	if t.UID == "" {
 		t.UID = t.ID
@@ -492,9 +508,9 @@ func taskFromItem(item map[string]any, listID string) bridge.Task {
 	}
 	pct := num(item, "PercentComplete")
 	switch {
-	case t.Completed != nil || pct >= 100:
+	case t.Completed != nil || pct >= 100 || str(item, "Status") == "Completed" || boolean(item, "IsComplete"):
 		t.Status = "completed"
-	case pct > 0:
+	case pct > 0 || str(item, "Status") == "InProgress":
 		t.Status = "in-process"
 	default:
 		t.Status = "needs-action"
@@ -517,7 +533,10 @@ func firstNonEmpty(a, b string) string {
 func taskToOWA(t bridge.Task) map[string]any {
 	item := map[string]any{
 		"__type": "Task:#Exchange", "Subject": t.Title,
-		"Body": map[string]any{"__type": "BodyContentType:#Exchange", "BodyType": "HTML", "Value": t.Body},
+		"Body": map[string]any{"__type": "BodyContentType:#Exchange", "BodyType": "Text", "Value": t.Body},
+	}
+	if t.UID != "" {
+		item["ExtendedProperty"] = []any{map[string]any{"ExtendedFieldURI": taskUIDField(), "Value": t.UID}}
 	}
 	if t.Due != nil {
 		item["DueDate"] = fmtTime(*t.Due)
@@ -532,6 +551,8 @@ func taskToOWA(t bridge.Task) map[string]any {
 		item["PercentComplete"] = 100
 	} else if t.Status == "in-process" {
 		item["PercentComplete"] = 50
+	} else {
+		item["PercentComplete"] = 0
 	}
 	switch {
 	case t.Priority >= 1 && t.Priority < 5:
@@ -558,14 +579,81 @@ func timeOrZero(t *time.Time) time.Time {
 }
 
 func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task, error) {
-	items, _, err := findItems(ctx, p, orDefault(listID, "tasks"), 0, 1000, nil)
-	if err != nil {
-		return nil, err
+	listID = orDefault(listID, "tasks")
+	var properties []any
+	// GetItem property URIs differ from the translated UpdateItem field names.
+	for _, field := range []string{
+		"item:Subject", "item:Body", "item:TextBody", "item:Importance", "task:DueDate", "task:StartDate", "task:CompleteDate",
+		"task:PercentComplete", "task:Status", "task:IsComplete", "item:ReminderDueBy", "item:ReminderIsSet", "task:Recurrence",
+	} {
+		properties = append(properties, propURI(field))
 	}
+	uidField := taskUIDField()
+	uidField["__type"] = "ExtendedPropertyUri:#Exchange"
+	properties = append(properties, uidField)
+	shape := map[string]any{"__type": "ItemResponseShape:#Exchange", "BaseShape": "Default", "AdditionalProperties": properties}
 	var out []bridge.Task
-	for _, it := range items {
-		out = append(out, taskFromItem(it, listID))
+	seen := map[string]bool{}
+	for offset := 0; ; {
+		req := findItemReq(listID, offset, 1000, nil)
+		delete(asMap(req["Body"]), "ShapeName")
+		res, err := p.call(ctx, "FindItem", req)
+		if err != nil {
+			return nil, err
+		}
+		if asMap(dig(res, "RootFolder")) == nil {
+			return nil, fmt.Errorf("owa: ListTasks: missing discovery folder in response")
+		}
+		rows := arr(res, "RootFolder", "Items")
+		total := int(num(res, "RootFolder", "TotalItemsInView"))
+		if len(rows) == 0 {
+			if offset < total {
+				return nil, fmt.Errorf("owa: ListTasks: incomplete discovery page")
+			}
+			break
+		}
+		for start := 0; start < len(rows); start += 100 {
+			var ids []string
+			pending := map[string]bool{}
+			for _, row := range rows[start:min(start+100, len(rows))] {
+				id := str(row, "ItemId", "Id")
+				if id == "" || seen[id] {
+					return nil, fmt.Errorf("owa: ListTasks: missing or duplicate discovery id")
+				}
+				ids = append(ids, id)
+				pending[id], seen[id] = true, true
+			}
+			full, err := p.call(ctx, "GetItem", getItemReq(ids, shape))
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range allItems(full) {
+				task := taskFromItem(item, listID)
+				typ := str(item, "__type")
+				if !pending[task.ID] || (typ != "" && typ != "Task:#Exchange") {
+					return nil, fmt.Errorf("owa: ListTasks: incomplete task item readback")
+				}
+				delete(pending, task.ID)
+				out = append(out, task)
+			}
+			if len(pending) != 0 {
+				return nil, fmt.Errorf("owa: ListTasks: missing task items in readback")
+			}
+		}
+		next := int(num(res, "RootFolder", "IndexedPagingOffset"))
+		if next == 0 {
+			next = offset + len(rows)
+		}
+		if next < offset+len(rows) {
+			return nil, fmt.Errorf("owa: ListTasks: discovery paging made no progress")
+		}
+		if boolean(res, "RootFolder", "IncludesLastItemInRange") || (total > 0 && next >= total) || (total == 0 && len(rows) < 1000) {
+			break
+		}
+		offset = next
 	}
+	p.log.Debug().Str("channel", "owa").Str("op", "list_tasks").Str("account", p.email).
+		Int("discovered", len(seen)).Int("returned", len(out)).Msg("owa task listing")
 	return out, nil
 }
 
@@ -579,9 +667,13 @@ func (p *provider) CreateTask(ctx context.Context, t bridge.Task) (bridge.Task, 
 		return bridge.Task{}, err
 	}
 	out := t
+	out.ID = ""
 	out.ListID = listID
 	if item := firstItem(res); item != nil {
 		out.ID = str(item, "ItemId", "Id")
+	}
+	if out.ID == "" {
+		return bridge.Task{}, fmt.Errorf("owa: CreateTask: missing task id in response")
 	}
 	if out.UID == "" {
 		out.UID = out.ID
@@ -594,25 +686,26 @@ func (p *provider) UpdateTask(ctx context.Context, t bridge.Task) error {
 		return fmt.Errorf("owa: UpdateTask: missing task id")
 	}
 	var updates []any
+	item := taskToOWA(t)
 	taskItem := func(k string, v any) map[string]any { return map[string]any{"__type": "Task:#Exchange", k: v} }
-	if t.Title != "" {
-		updates = setField(updates, "Task", "Subject", taskItem("Subject", t.Title))
+	// UpdateTask receives a full VTODO representation, not a sparse patch.
+	for _, field := range []string{"Subject", "Body", "Importance"} {
+		updates = setField(updates, "Task", field, taskItem(field, item[field]))
 	}
-	if t.Body != "" {
-		updates = setField(updates, "Task", "Body", taskItem("Body", map[string]any{"__type": "BodyContentType:#Exchange", "BodyType": "HTML", "Value": t.Body}))
+	for _, field := range []string{"DueDate", "StartDate", "CompleteDate"} {
+		if value, exists := item[field]; exists {
+			updates = setField(updates, "Task", "Task"+field, taskItem(field, value))
+		} else {
+			updates = append(updates, map[string]any{"__type": "DeleteItemField:#Exchange", "Path": propURI("Task" + field)})
+		}
 	}
-	if t.Due != nil {
-		updates = setField(updates, "Task", "TaskDueDate", taskItem("DueDate", fmtTime(*t.Due)))
-	}
-	if t.Start != nil {
-		updates = setField(updates, "Task", "TaskStartDate", taskItem("StartDate", fmtTime(*t.Start)))
-	}
-	if t.Completed != nil {
-		updates = setField(updates, "Task", "TaskCompleteDate", taskItem("CompleteDate", fmtTime(*t.Completed)))
-		updates = setField(updates, "Task", "TaskPercentComplete", taskItem("PercentComplete", 100))
-	}
-	if len(updates) == 0 {
-		return nil
+	// PercentComplete also changes native Status and clears completion on reopen.
+	updates = setField(updates, "Task", "TaskPercentComplete", taskItem("PercentComplete", item["PercentComplete"]))
+	if t.UID != "" {
+		path := taskUIDField()
+		path["__type"] = "ExtendedPropertyUri:#Exchange"
+		updates = append(updates, map[string]any{"__type": "SetItemField:#Exchange", "Path": path,
+			"Item": taskItem("ExtendedProperty", item["ExtendedProperty"])})
 	}
 	req := envelope("UpdateItemJsonRequest:#Exchange", "UpdateItemRequest:#Exchange", map[string]any{
 		"ItemChanges":        []any{map[string]any{"__type": "ItemChange:#Exchange", "ItemId": itemID(t.ID), "Updates": updates}},
@@ -624,9 +717,12 @@ func (p *provider) UpdateTask(ctx context.Context, t bridge.Task) error {
 }
 
 func (p *provider) DeleteTask(ctx context.Context, listID, id string) error {
+	if id == "" {
+		return fmt.Errorf("owa: DeleteTask: missing task id")
+	}
 	req := envelope("DeleteItemJsonRequest:#Exchange", "DeleteItemRequest:#Exchange", map[string]any{
 		"ItemIds": itemIDs([]string{id}), "DeleteType": "MoveToDeletedItems",
-		"SendMeetingCancellations": "SendToNone", "AffectedTaskOccurrences": "AllOccurrences", "SuppressReadRecipts": true,
+		"SendMeetingCancellations": "SendToNone", "AffectedTaskOccurrences": "AllOccurrences", "SuppressReadReceipts": true,
 	})
 	_, err := p.call(ctx, "DeleteItem", req)
 	return err

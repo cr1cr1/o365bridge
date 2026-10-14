@@ -3,12 +3,15 @@ package graph
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/cr1cr1/o365bridge/internal/bridge"
 )
 
 // --- Tasks (Microsoft To Do) ---
+
+const taskUIDExtensionName = "com.o365bridge.task"
 
 type graphTaskList struct {
 	ID          string `json:"id"`
@@ -41,6 +44,10 @@ type graphTask struct {
 	DueDateTime       *dateTimeTZ `json:"dueDateTime,omitempty"`
 	StartDateTime     *dateTimeTZ `json:"startDateTime,omitempty"`
 	CompletedDateTime *dateTimeTZ `json:"completedDateTime,omitempty"`
+	Extensions        []struct {
+		ExtensionName string `json:"extensionName"`
+		UID           string `json:"uid"`
+	} `json:"extensions,omitempty"`
 }
 
 func taskStatusToGraph(s string) string {
@@ -86,7 +93,13 @@ func priorityFromGraph(imp string) int {
 }
 
 func (g graphTask) toTask(listID string) bridge.Task {
-	t := bridge.Task{ID: g.ID, ListID: listID, Title: g.Title, Status: taskStatusFromGraph(g.Status), Priority: priorityFromGraph(g.Importance)}
+	t := bridge.Task{ID: g.ID, UID: g.ID, ListID: listID, Title: g.Title, Status: taskStatusFromGraph(g.Status), Priority: priorityFromGraph(g.Importance)}
+	for _, extension := range g.Extensions {
+		if extension.ExtensionName == taskUIDExtensionName && extension.UID != "" {
+			t.UID = extension.UID
+			break
+		}
+	}
 	if g.Body != nil {
 		t.Body = g.Body.Content
 	}
@@ -143,7 +156,8 @@ func taskJSON(t bridge.Task) map[string]any {
 }
 
 func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task, error) {
-	items, _, err := getAll[graphTask](ctx, p, "/me/todo/lists/"+esc(listID)+"/tasks", 0, nil)
+	query := url.Values{"$expand": {"extensions($filter=id eq '" + taskUIDExtensionName + "')"}}
+	items, _, err := getAll[graphTask](ctx, p, "/me/todo/lists/"+esc(listID)+"/tasks?"+query.Encode(), 0, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -155,13 +169,24 @@ func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task,
 }
 
 func (p *provider) CreateTask(ctx context.Context, t bridge.Task) (bridge.Task, error) {
+	body := taskJSON(t)
+	if t.UID != "" {
+		// Persist identity with the task, not in a second fallible request.
+		body["extensions"] = []any{map[string]any{
+			"@odata.type":   "microsoft.graph.openTypeExtension",
+			"extensionName": taskUIDExtensionName, "uid": t.UID,
+		}}
+	}
 	var gt graphTask
-	if err := p.doJSON(ctx, http.MethodPost, "/me/todo/lists/"+esc(t.ListID)+"/tasks", taskJSON(t), &gt); err != nil {
+	if err := p.doJSON(ctx, http.MethodPost, "/me/todo/lists/"+esc(t.ListID)+"/tasks", body, &gt); err != nil {
 		return bridge.Task{}, err
 	}
+	if gt.ID == "" {
+		return bridge.Task{}, bridge.Wrap(bridge.KindOther, "graph: create task response missing id", nil)
+	}
 	out := gt.toTask(t.ListID)
-	if out.ID == "" {
-		out = t
+	if t.UID != "" {
+		out.UID = t.UID // A create response need not expand extensions.
 	}
 	return out, nil
 }

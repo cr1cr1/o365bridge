@@ -142,6 +142,43 @@ raw item IDs. Distinct item IDs sharing a nonempty UID can still collide; recurr
 series/exception handling is incomplete. Shared UIDs must not be blindly replaced
 with item IDs, since that can break recurrence and invitation relationships.
 
+## Tasks (Thunderbird / CalDAV)
+
+Outlook tasks are native task items, not calendar appointments. The bridge
+exposes task lists as separate CalDAV collections supporting **VTODO**, while
+appointment calendars support **VEVENT**. In Thunderbird, use the discovered
+Tasks collection, not the appointment calendar, and synchronize that collection.
+OWA exposes the primary task folder at the stable URL
+`http://127.0.0.1:1080/caldav/<email>/tasks/`; custom OWA task-list discovery is
+not implemented. Graph discovers To Do lists using their opaque IDs. Use HTTPS
+when downstream TLS is enabled.
+
+OWA discovers task IDs in pages and hydrates complete task fields in batches
+of at most 100. Sparse discovery rows are not used as complete tasks, and
+incomplete readback fails instead of returning a misleading partial list.
+Client task UIDs are saved with the native task: a named string property for
+OWA and an open extension for opt-in Graph. This allows GET, query/multiget,
+update, and delete to resolve the same task after a bridge restart. Tasks
+without bridge UID metadata use their unique cloud task ID in both the URL
+and iCalendar UID; task titles are never identity keys. VTODO/VEVENT writes to
+the wrong collection are rejected rather than converted.
+
+If tasks created in Thunderbird appear in Outlook on the web but not locally,
+restart the current bridge build and synchronize the remote Tasks collection.
+Older creations did not store Thunderbird's UID; their original UID cannot be
+recovered reliably and they are fetched under their cloud IDs. **Do not recreate
+them blindly**, since they already exist upstream and retries can add duplicates.
+If they are still missing, run with `--log-level debug` and capture the
+`owa task listing` (OWA accounts) and `dav calendar report` lines from the same
+refresh. The listing logs contain counts, not task titles, bodies, raw IDs, or
+credentials.
+
+HTTP-backed tests cover native task creation, full readback, handler/provider
+reconstruction, query/multiget, update, completion/reopening, deletion, and
+legacy cloud-ID fallback. These are not a live Thunderbird/Microsoft acceptance
+check. Advanced recurring-task exceptions and complete reminder/progress
+fidelity remain limited.
+
 ## JMAP
 
 The bridge also serves JMAP (mail, calendars, contacts) on its own

@@ -117,6 +117,7 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 	var events []bridge.Event
 	var tasks []bridge.Task
 	var comp string // current component: VEVENT / VTODO / other
+	var parents []string
 	var ev *bridge.Event
 	var tk *bridge.Task
 	sawCal := false
@@ -140,6 +141,7 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 		}
 		switch prop.Name {
 		case "BEGIN":
+			parents = append(parents, comp)
 			switch strings.ToUpper(prop.Value) {
 			case "VCALENDAR":
 				sawCal = true
@@ -158,16 +160,13 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 			continue
 		case "END":
 			switch strings.ToUpper(prop.Value) {
-			case "VEVENT", "VTODO":
+			case "VEVENT", "VTODO", "VCALENDAR":
 				flush()
-				comp = "VCALENDAR"
-			case "VCALENDAR":
-				flush()
-				comp = ""
-			default:
-				if comp != "VEVENT" && comp != "VTODO" {
-					comp = "VCALENDAR"
-				}
+			}
+			comp = ""
+			if len(parents) > 0 {
+				comp = parents[len(parents)-1]
+				parents = parents[:len(parents)-1]
 			}
 			continue
 		}

@@ -523,6 +523,7 @@ func (h *handler) calObjects(r *http.Request, email string, coll collection, fro
 			if uid == "" {
 				uid = tk.ID
 			}
+			tk.UID = uid
 			out = append(out, calObj{uid: uid, id: tk.ID, data: generateTaskICalendar(tk)})
 		}
 		return out, nil
@@ -686,8 +687,27 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 		http.Error(w, "bad iCalendar", http.StatusBadRequest)
 		return
 	}
+	if len(events)+len(tasks) != 1 {
+		http.Error(w, "expected one VEVENT or VTODO", http.StatusBadRequest)
+		return
+	}
+	coll, ok, err := h.getColl(r, email, collID)
+	if err != nil {
+		h.upstreamErr(w, email, err)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if coll.Tasks != (len(tasks) == 1) {
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `<D:error xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><C:supported-calendar-component/></D:error>`)
+		return
+	}
 	ctx := r.Context()
-	if len(tasks) > 0 {
+	if coll.Tasks {
 		tk := tasks[0]
 		if tk.UID == "" {
 			tk.UID = uid

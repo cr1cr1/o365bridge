@@ -468,7 +468,28 @@ intermittent `TestSMTPTLSCloseDropsConnections/implicit_handshake` shutdown
 failure; the same failure reproduced from the unchanged `e362b03` baseline.
 SMTP code was left untouched rather than expanding the calendar fix's scope.
 
+Native task readback is repaired separately from appointments. Task collections
+advertise VTODO only. OWA discovers IDs without the mail-list shape and hydrates
+complete task fields in batches of at most 100, with paged discovery and explicit
+failure on incomplete responses. Client UIDs are persisted on native tasks:
+OWA uses the named `PublicStrings` string property `O365BridgeTaskUID`; Graph
+uses the `com.o365bridge.task` open extension in the initial task POST. Legacy
+items without metadata use their cloud ID consistently in href and iCalendar
+UID. No task title is used for matching and no task-content store is introduced.
+Collection/component validation prevents VTODO writes into appointment calendars
+or VEVENT writes into task collections. Nested alarms no longer discard task
+properties following the alarm. HTTP-backed regressions exercise a fresh-handler
+read after task creation, query/multiget, repeated PUT without duplication,
+completion/reopening, and selective deletion. See the
+[task readback design](<2026-10-14-task-readback-design.md>) for evidence and limits.
+Live Thunderbird/tenant acceptance remains owner-run.
+
 Known fidelity limits, all explicit rather than silent:
+
+- **Legacy task identity:** tasks created before client-UID metadata was saved
+  cannot reliably recover their original Thunderbird UID. They remain available
+  through cloud-ID fallback after refresh; no title-based migration is attempted.
+  Task recurrence/exception and reminder/progress mapping is still a subset.
 
 - **Calendar UID/recurrence identity:** distinct cloud items sharing a nonempty
   UID can produce the same DAV resource URL. Recurring masters are still filtered
