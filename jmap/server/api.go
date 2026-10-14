@@ -1,0 +1,266 @@
+package server
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+
+	jmap "github.com/cr1cr1/o365bridge/jmap"
+)
+
+// serveAPI implements the RFC 8620 §3 API endpoint.
+func (e *Engine) serveAPI(w http.ResponseWriter, r *http.Request) {
+	p := e.authenticate(w, r)
+	if p == nil {
+		return
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		mt, _, _ := strings.Cut(ct, ";")
+		if strings.TrimSpace(mt) != "application/json" {
+			writeProblem(w, &jmap.Problem{Type: jmap.ProblemNotJSON, Status: http.StatusBadRequest, Detail: "Content-Type is not application/json"})
+			return
+		}
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, int64(e.core.MaxSizeRequest)))
+	if err != nil {
+		var mb *http.MaxBytesError
+		if errors.As(err, &mb) {
+			writeProblem(w, &jmap.Problem{Type: jmap.ProblemLimit, Status: http.StatusRequestEntityTooLarge, Limit: "maxSizeRequest"})
+			return
+		}
+		writeProblem(w, &jmap.Problem{Type: jmap.ProblemNotJSON, Status: http.StatusBadRequest, Detail: err.Error()})
+		return
+	}
+	if !json.Valid(body) {
+		writeProblem(w, &jmap.Problem{Type: jmap.ProblemNotJSON, Status: http.StatusBadRequest, Detail: "request body is not JSON"})
+		return
+	}
+	var req jmap.Request
+	if err := json.Unmarshal(body, &req); err != nil || req.Using == nil || req.MethodCalls == nil {
+		writeProblem(w, &jmap.Problem{Type: jmap.ProblemNotRequest, Status: http.StatusBadRequest, Detail: "request body is not a JMAP request object"})
+		return
+	}
+	for _, u := range req.Using {
+		if !e.knownCapability(u) {
+			writeProblem(w, &jmap.Problem{Type: jmap.ProblemUnknownCapability, Status: http.StatusBadRequest, Detail: "unknown capability: " + string(u)})
+			return
+		}
+	}
+	if uint64(len(req.MethodCalls)) > e.core.MaxCallsInRequest {
+		writeProblem(w, &jmap.Problem{Type: jmap.ProblemLimit, Status: http.StatusBadRequest, Limit: "maxCallsInRequest"})
+		return
+	}
+
+	using := make(map[jmap.URI]bool, len(req.Using))
+	for _, u := range req.Using {
+		using[u] = true
+	}
+	created := make(map[jmap.ID]jmap.ID, len(req.CreatedIDs))
+	for k, v := range req.CreatedIDs {
+		created[k] = v
+	}
+	haveCreated := len(created) > 0
+
+	resp := &jmap.Response{MethodResponses: []*jmap.Invocation{}, SessionState: e.opts.SessionState}
+	prev := make(map[string]*jmap.Invocation) // callID -> response invocation
+
+	for _, inv := range req.MethodCalls {
+		out := e.dispatchOne(r, p, inv, using, prev, created)
+		resp.MethodResponses = append(resp.MethodResponses, out)
+		prev[inv.CallID] = out
+	}
+	if len(created) > 0 || haveCreated {
+		resp.CreatedIDs = created
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (e *Engine) dispatchOne(r *http.Request, p *Principal, inv *jmap.Invocation, using map[jmap.URI]bool, prev map[string]*jmap.Invocation, created map[jmap.ID]jmap.ID) (out *jmap.Invocation) {
+	args, err := resolveResultReferences(inv.Args, prev)
+	if err != nil {
+		return jmap.NewInvalidResultReference(err.Error()).Invocation(inv.CallID)
+	}
+	e.mu.RLock()
+	entry, ok := e.methods[inv.Name]
+	e.mu.RUnlock()
+	if !ok {
+		return jmap.NewUnknownMethod(inv.Name).Invocation(inv.CallID)
+	}
+	if entry.capability != "" && !using[entry.capability] {
+		// Decision (documented in the Phase 1b brief): RFC 8620 has no
+		// method-level unknownCapability type (§3.6.2) — the
+		// unknownCapability problem type is request-level. We still
+		// surface the string as a method error type here, pragmatically,
+		// so one under-declared call does not fail the whole request;
+		// later phases may refine this.
+		return jmap.NewMethodError("unknownCapability", "method "+inv.Name+" requires capability "+string(entry.capability)).Invocation(inv.CallID)
+	}
+	call := &Call{Name: inv.Name, CallID: inv.CallID, Args: args, Principal: p, Created: map[jmap.ID]jmap.ID{}}
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			out = jmap.NewServerFail(fmt.Sprintf("panic in %s: %v", inv.Name, rec)).Invocation(inv.CallID)
+		}
+	}()
+	res, herr := entry.handler(r.Context(), call)
+	for k, v := range call.Created {
+		created[k] = v
+	}
+	if herr != nil {
+		var me *jmap.MethodError
+		if errors.As(herr, &me) {
+			return me.Invocation(inv.CallID)
+		}
+		return jmap.NewServerFail(herr.Error()).Invocation(inv.CallID)
+	}
+	raw, err := marshalArgs(res)
+	if err != nil {
+		return jmap.NewServerFail(err.Error()).Invocation(inv.CallID)
+	}
+	return &jmap.Invocation{Name: inv.Name, Args: raw, CallID: inv.CallID}
+}
+
+func marshalArgs(v any) (json.RawMessage, error) {
+	if v == nil {
+		return json.RawMessage(`{}`), nil
+	}
+	if raw, ok := v.(json.RawMessage); ok {
+		if len(raw) == 0 {
+			return json.RawMessage(`{}`), nil
+		}
+		return raw, nil
+	}
+	return json.Marshal(v)
+}
+
+// --- result references (RFC 8620 §3.7) ---
+
+// resolveResultReferences replaces every "#name" argument whose value
+// is a ResultReference with name -> pointer-lookup into the referenced
+// earlier response's arguments.
+func resolveResultReferences(args json.RawMessage, prev map[string]*jmap.Invocation) (json.RawMessage, error) {
+	if len(args) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(args, &obj); err != nil {
+		return nil, fmt.Errorf("arguments are not an object: %w", err)
+	}
+	changed := false
+	for key, raw := range obj {
+		if !strings.HasPrefix(key, "#") {
+			continue
+		}
+		var ref jmap.ResultReference
+		if err := json.Unmarshal(raw, &ref); err != nil {
+			return nil, fmt.Errorf("invalid result reference for %q: %w", key, err)
+		}
+		val, err := lookupReference(ref, prev)
+		if err != nil {
+			return nil, err
+		}
+		enc, err := json.Marshal(val)
+		if err != nil {
+			return nil, err
+		}
+		delete(obj, key)
+		obj[key[1:]] = enc
+		changed = true
+	}
+	if !changed {
+		return args, nil
+	}
+	return json.Marshal(obj)
+}
+
+func lookupReference(ref jmap.ResultReference, prev map[string]*jmap.Invocation) (any, error) {
+	target, ok := prev[ref.ResultOf]
+	if !ok {
+		return nil, fmt.Errorf("no previous result with call id %q", ref.ResultOf)
+	}
+	if target.Name != ref.Name {
+		return nil, fmt.Errorf("result %q is named %q, not %q", ref.ResultOf, target.Name, ref.Name)
+	}
+	var doc any
+	if err := json.Unmarshal(target.Args, &doc); err != nil {
+		return nil, err
+	}
+	if ref.Path == "" || ref.Path == "/" {
+		// "" is the whole document; a bare "/" denotes the empty-string
+		// key per RFC 6901 — treat both leniently as the whole args only
+		// for "", and do a real lookup for "/".
+		if ref.Path == "" {
+			return doc, nil
+		}
+	}
+	tokens, err := pointerTokens(ref.Path)
+	if err != nil {
+		return nil, err
+	}
+	return evalPointer(doc, tokens)
+}
+
+func pointerTokens(path string) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("path %q is not a JSON Pointer", path)
+	}
+	parts := strings.Split(path[1:], "/")
+	for i, tok := range parts {
+		tok = strings.ReplaceAll(tok, "~1", "/")
+		tok = strings.ReplaceAll(tok, "~0", "~")
+		parts[i] = tok
+	}
+	return parts, nil
+}
+
+// evalPointer evaluates JSON Pointer tokens with the RFC 8620 §3.7 "*"
+// extension: on an array, "*" applies the remaining tokens to every
+// element and flattens the results into a single array.
+func evalPointer(v any, tokens []string) (any, error) {
+	if len(tokens) == 0 {
+		return v, nil
+	}
+	tok := tokens[0]
+	if tok == "*" {
+		arr, ok := v.([]any)
+		if !ok {
+			return nil, fmt.Errorf("'*' applied to a non-array value")
+		}
+		out := []any{}
+		for _, el := range arr {
+			r, err := evalPointer(el, tokens[1:])
+			if err != nil {
+				return nil, err
+			}
+			if ra, ok := r.([]any); ok {
+				out = append(out, ra...)
+			} else {
+				out = append(out, r)
+			}
+		}
+		return out, nil
+	}
+	switch cur := v.(type) {
+	case map[string]any:
+		next, ok := cur[tok]
+		if !ok {
+			return nil, fmt.Errorf("no key %q in referenced result", tok)
+		}
+		return evalPointer(next, tokens[1:])
+	case []any:
+		i, err := strconv.Atoi(tok)
+		if err != nil || i < 0 || i >= len(cur) {
+			return nil, fmt.Errorf("invalid array index %q in referenced result", tok)
+		}
+		return evalPointer(cur[i], tokens[1:])
+	default:
+		return nil, fmt.Errorf("cannot descend into scalar value at %q", tok)
+	}
+}
