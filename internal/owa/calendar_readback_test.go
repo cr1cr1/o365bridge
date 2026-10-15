@@ -19,14 +19,15 @@ func calendarReadbackItem(id, uid string) map[string]any {
 		"__type": "CalendarItem:#Exchange", "ItemId": map[string]any{"Id": id},
 		"UID": uid, "Subject": "Readback meeting",
 		"Start": "2026-10-15T10:00:00", "End": "2026-10-15T11:00:00",
-		"StartTimeZone": map[string]any{"Id": "E. Europe Standard Time"},
+		"StartTimeZone": map[string]any{"Id": "GTB Standard Time"},
 		"Body":          map[string]any{"Value": "Meeting details"},
 		"RequiredAttendees": []any{map[string]any{
 			"Mailbox": map[string]any{"EmailAddress": "guest@example.com"}, "ResponseType": "Accept",
 		}},
 		"Recurrence": map[string]any{
+			"__type":            "RecurrenceType:#Exchange",
 			"RecurrencePattern": map[string]any{"__type": "DailyRecurrence:#Exchange", "Interval": 2},
-			"RecurrenceRange":   map[string]any{"NumberOfOccurrences": 3},
+			"RecurrenceRange":   map[string]any{"__type": "NumberedRecurrence:#Exchange", "StartDate": "2026-10-15", "NumberOfOccurrences": 3},
 		},
 		"ReminderIsSet": true, "ReminderMinutesBeforeStart": 15,
 	}
@@ -127,7 +128,17 @@ func TestListEventsDoesNotHideIncompleteReadback(t *testing.T) {
 type calendarReadbackLogin struct{ bridge.LoginManager }
 
 func TestCalDAVCreatedOWAEventRemainsReadable(t *testing.T) {
+	testCalDAVCreatedOWAEventRemainsReadable(t, false)
+}
+
+func TestCalDAVRecurringOWAEventRemainsReadable(t *testing.T) {
+	testCalDAVCreatedOWAEventRemainsReadable(t, true)
+}
+
+func testCalDAVCreatedOWAEventRemainsReadable(t *testing.T, recurring bool) {
+	t.Helper()
 	const uid = "client-event-uid"
+	recurrenceUpdates := 0
 	var stored map[string]any
 	_, upstream := newFake(t, func(action string, req map[string]any) any {
 		switch action {
@@ -140,7 +151,11 @@ func TestCalDAVCreatedOWAEventRemainsReadable(t *testing.T) {
 			}
 			return okBody(map[string]any{"RootFolder": map[string]any{"Items": items, "TotalItemsInView": len(items)}})
 		case "CreateItem":
-			stored = asMap(arr(req, "Body", "Items")[0])
+			candidate := asMap(arr(req, "Body", "Items")[0])
+			if recurring && (str(candidate, "Recurrence", "__type") != "RecurrenceType:#Exchange" || str(candidate, "Recurrence", "RecurrencePattern", "__type") != "WeeklyRecurrence:#Exchange" || num(candidate, "Recurrence", "RecurrencePattern", "Interval") != 1 || str(candidate, "Recurrence", "RecurrencePattern", "DaysOfWeek") != "Thursday" || str(candidate, "Recurrence", "RecurrencePattern", "FirstDayOfWeek") != "Monday" || str(candidate, "Recurrence", "RecurrenceRange", "__type") != "NumberedRecurrence:#Exchange" || str(candidate, "Recurrence", "RecurrenceRange", "StartDate") != "2026-10-15" || num(candidate, "Recurrence", "RecurrenceRange", "NumberOfOccurrences") != 4) {
+				return okBody(map[string]any{"ResponseClass": "Error", "ResponseCode": "ErrorInvalidPropertySet"})
+			}
+			stored = candidate
 			stored["ItemId"] = map[string]any{"Id": "upstream-event"}
 			return itemResp(map[string]any{"ItemId": map[string]any{"Id": "upstream-event"}})
 		case "GetItem":
@@ -153,6 +168,17 @@ func TestCalDAVCreatedOWAEventRemainsReadable(t *testing.T) {
 			for _, update := range arr(change, "Updates") {
 				if str(update, "Path", "FieldURI") == "Subject" {
 					stored["Subject"] = str(update, "Item", "Subject")
+				}
+				if str(update, "Path", "FieldURI") == "Recurrence" {
+					recurrenceUpdates++
+					if str(req, "Header", "TimeZoneContext", "TimeZoneDefinition", "Id") != "UTC" {
+						t.Errorf("recurrence update omitted UTC context: %+v", req)
+					}
+					if str(update, "__type") == "DeleteItemField:#Exchange" {
+						delete(stored, "Recurrence")
+					} else {
+						stored["Recurrence"] = dig(update, "Item", "Recurrence")
+					}
 				}
 			}
 			return itemResp(stored)
@@ -192,6 +218,10 @@ func TestCalDAVCreatedOWAEventRemainsReadable(t *testing.T) {
 	}
 	path := "/caldav/" + email + "/calendar/" + uid + ".ics"
 	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:" + uid + "\r\nDTSTART:20261015T070000Z\r\nDTEND:20261015T080000Z\r\nSUMMARY:Readback meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	const repeat = "RRULE:FREQ=WEEKLY;BYDAY=TH;COUNT=4\r\n"
+	if recurring {
+		ics = strings.ReplaceAll(ics, "END:VEVENT", repeat+"END:VEVENT")
+	}
 	if rr := request("PUT", path, ics); rr.Code != http.StatusCreated {
 		t.Fatalf("PUT = %d: %s", rr.Code, rr.Body.String())
 	}
@@ -208,6 +238,30 @@ func TestCalDAVCreatedOWAEventRemainsReadable(t *testing.T) {
 	multiget := `<C:calendar-multiget xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><C:calendar-data/></D:prop><D:href>` + path + `</D:href></C:calendar-multiget>`
 	if rr := request("REPORT", "/caldav/"+email+"/calendar/", multiget); rr.Code != http.StatusMultiStatus || !strings.Contains(rr.Body.String(), "Updated meeting") {
 		t.Fatalf("multiget after update = %d: %s", rr.Code, rr.Body.String())
+	}
+	if recurring {
+		if recurrenceUpdates != 0 {
+			t.Fatalf("ordinary title edit rewrote native repeat %d times", recurrenceUpdates)
+		}
+		if rr := request("GET", path, ""); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "FREQ=WEEKLY;BYDAY=TH;WKST=MO;COUNT=4") {
+			t.Fatalf("weekly selectors not retained after ordinary edit: %d: %s", rr.Code, rr.Body.String())
+		}
+		edited := strings.ReplaceAll(ics, repeat, "RRULE:FREQ=MONTHLY;BYMONTHDAY=15;COUNT=3\r\n")
+		if rr := request("PUT", path, edited); rr.Code != http.StatusNoContent {
+			t.Fatalf("series edit = %d: %s", rr.Code, rr.Body.String())
+		}
+		if rr := request("GET", path, ""); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "FREQ=MONTHLY;BYMONTHDAY=15;COUNT=3") {
+			t.Fatalf("GET after series edit = %d: %s", rr.Code, rr.Body.String())
+		}
+		if rr := request("PUT", path, strings.ReplaceAll(ics, repeat, "")); rr.Code != http.StatusNoContent {
+			t.Fatalf("series clear = %d: %s", rr.Code, rr.Body.String())
+		}
+		if rr := request("REPORT", "/caldav/"+email+"/calendar/", multiget); rr.Code != http.StatusMultiStatus || strings.Contains(rr.Body.String(), "RRULE") {
+			t.Fatalf("multiget after series clear = %d: %s", rr.Code, rr.Body.String())
+		}
+		if recurrenceUpdates != 2 {
+			t.Fatalf("series edit and clear made %d native repeat updates, want 2", recurrenceUpdates)
+		}
 	}
 	if rr := request("DELETE", path, ""); rr.Code != http.StatusNoContent {
 		t.Fatalf("DELETE = %d: %s", rr.Code, rr.Body.String())

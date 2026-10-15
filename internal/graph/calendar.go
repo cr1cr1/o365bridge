@@ -2,6 +2,8 @@ package graph
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -32,6 +34,7 @@ func (p *provider) ListCalendars(ctx context.Context) ([]bridge.Calendar, error)
 type graphEvent struct {
 	ID         string   `json:"id"`
 	ICalUID    string   `json:"iCalUId"`
+	Type       string   `json:"type"`
 	Subject    string   `json:"subject"`
 	Categories []string `json:"categories"`
 	Body       struct {
@@ -54,8 +57,9 @@ type graphEvent struct {
 		} `json:"status"`
 		EmailAddress emailAddress `json:"emailAddress"`
 	} `json:"attendees"`
-	ReminderMinutes *int `json:"reminderMinutesBeforeStart"`
-	IsReminderOn    bool `json:"isReminderOn"`
+	ReminderMinutes *int                  `json:"reminderMinutesBeforeStart"`
+	IsReminderOn    bool                  `json:"isReminderOn"`
+	Recurrence      *graphEventRecurrence `json:"recurrence"`
 }
 
 func (g graphEvent) toEvent(calendarID string) bridge.Event {
@@ -83,10 +87,13 @@ func (g graphEvent) toEvent(calendarID string) bridge.Event {
 		v := *g.ReminderMinutes
 		ev.ReminderMin = &v
 	}
+	if g.Recurrence != nil {
+		ev.Recurrence, ev.TimeZone, ev.RecurrenceUnsupported = g.Recurrence.eventRepeat(ev)
+	}
 	return ev
 }
 
-func eventJSON(ev bridge.Event) map[string]any {
+func eventJSON(ev bridge.Event, update bool) (map[string]any, error) {
 	m := map[string]any{
 		"subject":  ev.Summary,
 		"start":    toGraphDT(ev.Start, ev.TimeZone),
@@ -115,19 +122,29 @@ func eventJSON(ev bridge.Event) map[string]any {
 	} else {
 		m["isReminderOn"] = false
 	}
-	// Recurrence: bridge carries an RRULE string, Graph a structured
-	// pattern; omitting it avoids corrupting events we cannot map faithfully.
-	return m
+	if !update || ev.RecurrenceSet {
+		if ev.RecurrenceUnsupported && (!update || ev.Recurrence != "") {
+			return nil, bridge.Wrap(bridge.KindOther, "graph: unsupported event recurrence", errors.ErrUnsupported)
+		}
+		recurrence, err := eventRecurrenceJSON(ev)
+		if err != nil {
+			return nil, bridge.Wrap(bridge.KindOther, "graph: invalid event recurrence", err)
+		}
+		if recurrence != nil {
+			m["recurrence"] = recurrence
+		} else if update {
+			m["recurrence"] = nil
+		}
+	}
+	return m, nil
 }
 
 func (p *provider) ListEvents(ctx context.Context, calendarID string, from, to time.Time) ([]bridge.Event, error) {
 	q := url.Values{}
-	q.Set("startDateTime", from.UTC().Format(time.RFC3339))
-	q.Set("endDateTime", to.UTC().Format(time.RFC3339))
 	q.Set("$orderby", "start/dateTime")
-	base := "/me/calendarview"
+	base := "/me/events"
 	if calendarID != "" {
-		base = "/me/calendars/" + esc(calendarID) + "/calendarview"
+		base = "/me/calendars/" + esc(calendarID) + "/events"
 	}
 	items, _, err := getAll[graphEvent](ctx, p, base+"?"+q.Encode(), 0, nil)
 	if err != nil {
@@ -135,7 +152,14 @@ func (p *provider) ListEvents(ctx context.Context, calendarID string, from, to t
 	}
 	out := make([]bridge.Event, 0, len(items))
 	for _, it := range items {
-		out = append(out, it.toEvent(calendarID))
+		ev := it.toEvent(calendarID)
+		// shortcut: include masters conservatively; exact window pruning needs recurrence expansion.
+		if it.Type != "seriesMaster" && it.Recurrence == nil {
+			if (!from.IsZero() && !ev.End.After(from)) || (!to.IsZero() && !ev.Start.Before(to)) {
+				continue
+			}
+		}
+		out = append(out, ev)
 	}
 	return out, nil
 }
@@ -145,19 +169,77 @@ func (p *provider) CreateEvent(ctx context.Context, ev bridge.Event) (bridge.Eve
 	if ev.CalendarID != "" {
 		path = "/me/calendars/" + esc(ev.CalendarID) + "/events"
 	}
-	var ge graphEvent
-	if err := p.doJSON(ctx, http.MethodPost, path, eventJSON(ev), &ge); err != nil {
+	body, err := eventJSON(ev, false)
+	if err != nil {
 		return bridge.Event{}, err
 	}
+	var response json.RawMessage
+	if err := p.doJSON(ctx, http.MethodPost, path, body, &response); err != nil {
+		return bridge.Event{}, err
+	}
+	var ge graphEvent
+	if err := json.Unmarshal(response, &ge); err != nil {
+		return bridge.Event{}, err
+	}
+	if strings.TrimSpace(ge.ID) == "" {
+		return bridge.Event{}, bridge.Wrap(bridge.KindOther, "graph: create event response missing id", nil)
+	}
 	out := ge.toEvent(ev.CalendarID)
-	if out.ID == "" {
-		out = ev
+	// A sparse create response may omit accepted fields, but never replace its real identity.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(response, &fields); err != nil {
+		return bridge.Event{}, err
+	}
+	if _, ok := fields["iCalUId"]; !ok {
+		out.UID = ev.UID
+	}
+	if _, ok := fields["subject"]; !ok {
+		out.Summary = ev.Summary
+	}
+	if _, ok := fields["body"]; !ok {
+		out.Description = ev.Description
+	}
+	if _, ok := fields["location"]; !ok {
+		out.Location = ev.Location
+	}
+	if _, ok := fields["categories"]; !ok {
+		out.Categories = ev.Categories
+	}
+	if _, ok := fields["start"]; !ok {
+		out.Start, out.TimeZone = ev.Start, ev.TimeZone
+	}
+	if _, ok := fields["end"]; !ok {
+		out.End = ev.End
+	}
+	if _, ok := fields["isAllDay"]; !ok {
+		out.AllDay = ev.AllDay
+	}
+	if _, ok := fields["attendees"]; !ok {
+		out.Attendees = ev.Attendees
+	}
+	if _, ok := fields["organizer"]; !ok {
+		out.Organizer = ev.Organizer
+	}
+	if _, ok := fields["isReminderOn"]; !ok {
+		out.ReminderMin = ev.ReminderMin
+	}
+	if _, ok := fields["recurrence"]; !ok {
+		out.Recurrence = ev.Recurrence
+		if ev.TimeZone != "" {
+			out.TimeZone = ev.TimeZone
+		}
+	} else if ge.Recurrence != nil {
+		out.Recurrence, out.TimeZone, out.RecurrenceUnsupported = ge.Recurrence.eventRepeat(out)
 	}
 	return out, nil
 }
 
 func (p *provider) UpdateEvent(ctx context.Context, ev bridge.Event) error {
-	return p.doJSON(ctx, http.MethodPatch, "/me/events/"+esc(ev.ID), eventJSON(ev), nil)
+	body, err := eventJSON(ev, true)
+	if err != nil {
+		return err
+	}
+	return p.doJSON(ctx, http.MethodPatch, "/me/events/"+esc(ev.ID), body, nil)
 }
 
 func (p *provider) DeleteEvent(ctx context.Context, calendarID, id string) error {

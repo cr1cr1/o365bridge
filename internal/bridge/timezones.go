@@ -258,13 +258,54 @@ var ianaToWindows = map[string]string{
 	"GMT":     "UTC",
 }
 
+// windowsCanonicalIANA corrects alphabetical reverse choices to Unicode CLDR's
+// territory 001 (global default) mappings for the Windows IDs supported above.
+// Source: CLDR release-47, commit 2ef784e3a4168bc2a43cd1b5b9839b6636f5899c:
+// https://raw.githubusercontent.com/unicode-org/cldr/2ef784e3a4168bc2a43cd1b5b9839b6636f5899c/common/supplemental/windowsZones.xml
+// Only differing choices are listed; existing equivalent IANA spellings and
+// UTC's Etc/GMT spelling are retained. Forward aliases remain approximate, so
+// a canonical reverse choice need not roundtrip through ToWindowsZone.
+var windowsCanonicalIANA = map[string]string{
+	"AUS Eastern Standard Time":       "Australia/Sydney",
+	"Arab Standard Time":              "Asia/Riyadh",
+	"Central America Standard Time":   "America/Guatemala",
+	"Central Asia Standard Time":      "Asia/Bishkek",
+	"Central Europe Standard Time":    "Europe/Budapest",
+	"Central Pacific Standard Time":   "Pacific/Guadalcanal",
+	"China Standard Time":             "Asia/Shanghai",
+	"E. Africa Standard Time":         "Africa/Nairobi",
+	"E. Europe Standard Time":         "Europe/Chisinau",
+	"Eastern Standard Time":           "America/New_York",
+	"FLE Standard Time":               "Europe/Kiev",
+	"GMT Standard Time":               "Europe/London",
+	"GTB Standard Time":               "Europe/Bucharest",
+	"Greenwich Standard Time":         "Atlantic/Reykjavik",
+	"Magallanes Standard Time":        "America/Punta_Arenas",
+	"Middle East Standard Time":       "Asia/Beirut",
+	"Mountain Standard Time (Mexico)": "America/Mazatlan",
+	"Romance Standard Time":           "Europe/Paris",
+	"Russia Time Zone 11":             "Asia/Kamchatka",
+	"SA Western Standard Time":        "America/La_Paz",
+	"Singapore Standard Time":         "Asia/Singapore",
+	"South Africa Standard Time":      "Africa/Johannesburg",
+	"Tokyo Standard Time":             "Asia/Tokyo",
+	"UTC+12":                          "Etc/GMT-12",
+	"UTC-02":                          "Etc/GMT+2",
+	"UTC-11":                          "Etc/GMT+11",
+	"Ulaanbaatar Standard Time":       "Asia/Ulaanbaatar",
+	"W. Central Africa Standard Time": "Africa/Lagos",
+	"W. Europe Standard Time":         "Europe/Berlin",
+	"West Asia Standard Time":         "Asia/Tashkent",
+	"West Pacific Standard Time":      "Pacific/Port_Moresby",
+}
+
 var windowsToIANA = buildReverse()
 
 func buildReverse() map[string]string {
-	// Several IANA zones share one Windows ID, so the reverse
-	// mapping is inherently approximate. Iterate in sorted order so
-	// the chosen canonical zone is at least deterministic across
-	// processes (Go map iteration order is random).
+	// Keep a deterministic fallback for supported IDs without an override,
+	// including legacy Windows IDs absent from CLDR (Kamchatka and Tunisia).
+	// Alphabetical aliases alone are unsafe: Eastern would select Atikokan,
+	// which lacks New York's DST transitions.
 	keys := make([]string, 0, len(ianaToWindows))
 	for iana := range ianaToWindows {
 		keys = append(keys, iana)
@@ -276,6 +317,9 @@ func buildReverse() map[string]string {
 		if _, ok := out[win]; !ok {
 			out[win] = iana
 		}
+	}
+	for win, iana := range windowsCanonicalIANA {
+		out[win] = iana
 	}
 	return out
 }

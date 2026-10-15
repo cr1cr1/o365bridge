@@ -142,6 +142,66 @@ raw item IDs. Distinct item IDs sharing a nonempty UID can still collide; recurr
 series/exception handling is incomplete. Shared UIDs must not be blindly replaced
 with item IDs, since that can break recurrence and invitation relationships.
 
+## Recurring calendar events
+
+Whole-series scheduled repetition is mapped to native OWA and Graph calendar
+patterns: daily, weekly (including weekday lists/week start), and representable
+absolute/relative monthly and yearly rules, with count, inclusive end date or
+no end. OWA supplies required default intervals/selectors; recurrence edits and
+clears now use the native field. Graph sends/reads its structured recurrence and
+lists native single events/series masters through `/events`, not expanded
+calendarView instances. Single-event overlap is filtered locally; masters are
+conservatively retained for client expansion (not exact occurrence-window matching).
+Creation requires a real native item ID; an unexpected success-shaped response
+without one is not reported as a successful calendar save.
+
+Rule anchors use the event's local calendar date. Timed `UNTIL` must be a UTC
+DATE-TIME; all-day `UNTIL` must be DATE. An inclusive native end date never adds
+an occurrence whose local start is after the requested cutoff. Repeating events
+retain IANA `TZID` wall times instead of becoming fixed-UTC schedules across DST.
+Windows timezone readback uses pinned CLDR global defaults, rather than choosing
+an arbitrary alphabetical alias (which could select a no-DST zone). Existing
+forward aliases remain approximate. Clients need IANA timezone data; custom
+`VTIMEZONE` definitions and generated timezone components are not supported.
+
+A complete CalDAV PUT can change or remove a supported rule; unrelated
+GET/edit/PUTs preserve native repetition without rewriting it. Supported anchor
+defaults, single ordinal weekday spellings and rule ordering compare equally.
+Partial provider updates change repetition only with `Event.RecurrenceSet=true`.
+Unknown/unrepresentable native rules carry an unsupported marker and survive
+ordinary edits; replacing or moving those series through CalDAV is refused.
+Invitation replies must be sent separately from recurrence changes, so an
+invalid series edit cannot partially send a response.
+
+**Limits:** event rules that native APIs clamp to another date are not silently
+translated into skipping rules. Absolute monthly days 29–31 and yearly February
+29/invalid fixed dates are conservatively unsupported; use Outlook for these
+patterns. Explicit representable relative last-day patterns remain separate.
+The underlying distinction is documented for native
+[monthly](<https://learn.microsoft.com/en-us/exchange/client-developer/web-service-reference/absolutemonthlyrecurrence>)
+and [yearly](<https://learn.microsoft.com/en-us/exchange/client-developer/web-service-reference/absoluteyearlyrecurrence>)
+patterns.
+OWA native interval bounds are enforced. `RDATE`, `EXDATE`, `RECURRENCE-ID`, and
+multiple RRULEs are rejected rather than discarded. Occurrence/exception
+editing, shared-UID series identity, OWA master expansion into later query
+windows, and full JMAP recurrence editing remain incomplete. The limited JMAP
+adapter rejects selectors/exceptions it cannot translate instead of dropping
+them. Graph event resources still use cloud `iCalUId`: persistence of the initial
+CalDAV client UID on a newly created Graph event is not implemented, so same-path
+Graph create/GET identity parity is not claimed. The full create/GET/query/edit/
+clear integration regression uses OWA, which writes the client UID natively.
+Task recurrence codecs and mutation semantics are unchanged; shared canonical
+timezone readback applies to all providers.
+
+Series PUT responses omit ETags because native recurrence normalization can
+change the representation; a fresh GET supplies the canonical ETag for the next
+conditional edit. Restart the current build and refresh the appointment calendar
+before editing; refresh/retry a stale `412` rather than forcing an overwrite.
+Real HTTP adapter regressions cover native schema acceptance, readback,
+unchanged-series preservation and explicit replace/clear. Actual Outlook cloud
+visibility, client expansion and live tenant acceptance still need an owner-run
+check; inspect Outlook before recreating missing items to avoid duplicates.
+
 ## Event categories
 
 Outlook event category **names** are synchronized through OWA and Graph to

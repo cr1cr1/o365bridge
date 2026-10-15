@@ -395,6 +395,13 @@ func eventFromJMAP(ce calendars.CalendarEvent) (bridge.Event, *jmap.SetError) {
 		ID: string(ce.ID), UID: ce.UID, Summary: ce.Title, Description: ce.Description,
 		AllDay: ce.AllDay, Sequence: int(ce.Sequence),
 	}
+	if len(ce.RecurrenceOverrides) > 0 || len(ce.ExcludedRecurrenceRules) > 0 {
+		return ev, invalid("recurrence exceptions are not supported by the bridge", "recurrenceOverrides", "excludedRecurrenceRules")
+	}
+	if rule := ce.RecurrenceRule; rule != nil && (rule.RScale != "" || rule.Skip != "" || rule.FirstDayOfWeek != "" ||
+		len(rule.ByDay)+len(rule.ByMonthDay)+len(rule.ByMonth)+len(rule.ByYearDay)+len(rule.ByWeekNo)+len(rule.ByHour)+len(rule.ByMinute)+len(rule.BySecond)+len(rule.BySetPosition) > 0) {
+		return ev, invalid("this recurrence selector cannot be translated by the JMAP adapter; use CalDAV", "recurrenceRule")
+	}
 	calIDs := make([]string, 0, len(ce.CalendarIDs))
 	for id, ok := range ce.CalendarIDs {
 		if ok {

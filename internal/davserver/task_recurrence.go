@@ -8,7 +8,8 @@ import (
 	"github.com/cr1cr1/o365bridge/internal/bridge"
 )
 
-func sameTaskRule(a, b string) bool {
+// sameRecurrenceRule compares syntax/defaults only, shared by task and event PUTs.
+func sameRecurrenceRule(a, b string) bool {
 	normalize := func(rule string) (string, bool) {
 		rule = strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(rule)), "RRULE:")
 		if rule == "" {

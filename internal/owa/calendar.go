@@ -72,43 +72,6 @@ func attendeesFrom(item map[string]any) []bridge.Attendee {
 	return out
 }
 
-func recurrenceToRRULE(item map[string]any) string {
-	rec := asMap(item["Recurrence"])
-	if rec == nil {
-		return ""
-	}
-	pat := asMap(rec["RecurrencePattern"])
-	if pat == nil {
-		return ""
-	}
-	t := str(pat, "__type")
-	freq := ""
-	switch {
-	case strings.HasPrefix(t, "Daily"):
-		freq = "DAILY"
-	case strings.HasPrefix(t, "Weekly"):
-		freq = "WEEKLY"
-	case strings.Contains(t, "Yearly"):
-		freq = "YEARLY"
-	default:
-		freq = "MONTHLY"
-	}
-	parts := []string{"FREQ=" + freq}
-	if iv := int(num(pat, "Interval")); iv > 1 {
-		parts = append(parts, "INTERVAL="+strconv.Itoa(iv))
-	}
-	rng := asMap(rec["RecurrenceRange"])
-	if rng != nil {
-		if n := int(num(rng, "NumberOfOccurrences")); n > 0 {
-			parts = append(parts, "COUNT="+strconv.Itoa(n))
-		}
-		if until := str(rng, "EndDate"); until != "" {
-			parts = append(parts, "UNTIL="+strings.ReplaceAll(strings.TrimSpace(until[:min(10, len(until))]), "-", ""))
-		}
-	}
-	return strings.Join(parts, ";")
-}
-
 func eventFromItem(item map[string]any, calendarID string) bridge.Event {
 	// Exchange returns Windows zone IDs and naive wall times:
 	// convert the ID to IANA and interpret Start/End in that zone.
@@ -123,11 +86,11 @@ func eventFromItem(item map[string]any, calendarID string) bridge.Event {
 		UID: str(item, "UID"), Summary: str(item, "Subject"),
 		Description: bodyText(item),
 		Start:       parseZoned(str(item, "Start"), iana), End: parseZoned(str(item, "End"), iana),
-		AllDay:     boolean(item, "IsAllDayEvent"),
-		Attendees:  attendeesFrom(item),
-		Recurrence: recurrenceToRRULE(item),
-		TimeZone:   iana,
+		AllDay:    boolean(item, "IsAllDayEvent"),
+		Attendees: attendeesFrom(item),
+		TimeZone:  iana,
 	}
+	ev.Recurrence, ev.RecurrenceUnsupported = eventRecurrenceFromOWA(item, ev)
 	if categories := arr(item, "Categories"); categories != nil {
 		ev.Categories = make([]string, 0, len(categories))
 		for _, value := range categories {
@@ -150,42 +113,6 @@ func eventFromItem(item map[string]any, calendarID string) bridge.Event {
 		ev.UID = ev.ID
 	}
 	return ev
-}
-
-func rruleToRecurrence(rrule string, start time.Time) map[string]any {
-	// Minimal RRULE -> OWA Recurrence conversion (FREQ/INTERVAL/COUNT/UNTIL).
-	kv := map[string]string{}
-	for _, part := range strings.Split(rrule, ";") {
-		if k, v, ok := strings.Cut(part, "="); ok {
-			kv[strings.ToUpper(strings.TrimSpace(k))] = strings.TrimSpace(v)
-		}
-	}
-	freq := strings.Title(strings.ToLower(kv["FREQ"]))
-	if freq == "" {
-		return nil
-	}
-	patType := freq + "Recurrence:#Exchange"
-	if freq == "Monthly" || freq == "Yearly" {
-		patType = "Absolute" + patType
-	}
-	pat := map[string]any{"__type": patType}
-	if iv, err := strconv.Atoi(kv["INTERVAL"]); err == nil && iv > 0 {
-		pat["Interval"] = iv
-	}
-	startDate := start.Format("2006-01-02")
-	var rng map[string]any
-	if n, err := strconv.Atoi(kv["COUNT"]); err == nil && n > 0 {
-		rng = map[string]any{"__type": "NumberedRecurrence:#Exchange", "StartDate": startDate, "NumberOfOccurrences": n}
-	} else if until := kv["UNTIL"]; until != "" {
-		u := until
-		if len(u) >= 8 {
-			u = u[:4] + "-" + u[4:6] + "-" + u[6:8]
-		}
-		rng = map[string]any{"__type": "EndDateRecurrence:#Exchange", "StartDate": startDate, "EndDate": u}
-	} else {
-		rng = map[string]any{"__type": "NoEndRecurrence:#Exchange", "StartDate": startDate}
-	}
-	return map[string]any{"__type": "RecurrenceType:#Exchange", "RecurrencePattern": pat, "RecurrenceRange": rng}
 }
 
 func eventToOWA(ev bridge.Event) map[string]any {
@@ -215,9 +142,6 @@ func eventToOWA(ev bridge.Event) map[string]any {
 		win := bridge.ToWindowsZone(ev.TimeZone)
 		item["StartTimeZone"] = map[string]any{"__type": "TimeZoneDefinitionType:#Exchange", "Id": win}
 		item["EndTimeZone"] = map[string]any{"__type": "TimeZoneDefinitionType:#Exchange", "Id": win}
-	}
-	if rec := rruleToRecurrence(ev.Recurrence, ev.Start); rec != nil {
-		item["Recurrence"] = rec
 	}
 	return item
 }
@@ -337,15 +261,29 @@ func hdrWithTZ(windowsID string) map[string]any {
 }
 
 func (p *provider) CreateEvent(ctx context.Context, ev bridge.Event) (bridge.Event, error) {
+	if strings.TrimSpace(ev.Recurrence) != "" && ev.TimeZone == "" {
+		ev.TimeZone = ev.Start.Location().String()
+	}
+	recurrence, err := eventRecurrenceToOWA(ev)
+	if err != nil {
+		return bridge.Event{}, err
+	}
+	item := eventToOWA(ev)
+	if recurrence != nil {
+		item["Recurrence"] = recurrence
+	}
 	calID := orDefault(ev.CalendarID, "calendar")
 	req := envelope("CreateItemJsonRequest:#Exchange", "CreateItemRequest:#Exchange", map[string]any{
-		"Items": []any{eventToOWA(ev)}, "SavedItemFolderId": targetFolder(calID),
+		"Items": []any{item}, "SavedItemFolderId": targetFolder(calID),
 		"SendMeetingInvitations": "SendToNone",
 	})
 	req["Header"] = hdrWithTZ(bridge.ToWindowsZone(ev.TimeZone))
 	res, err := p.call(ctx, "CreateItem", req)
 	if err != nil {
 		return bridge.Event{}, err
+	}
+	if str(firstItem(res), "ItemId", "Id") == "" {
+		return bridge.Event{}, fmt.Errorf("owa: CreateEvent: response missing native item ID")
 	}
 	out := ev
 	out.CalendarID = calID
@@ -372,6 +310,23 @@ func (p *provider) UpdateEvent(ctx context.Context, ev bridge.Event) error {
 	var updates []any
 	calItem := func(k string, v any) map[string]any {
 		return map[string]any{"__type": "CalendarItem:#Exchange", k: v}
+	}
+	if ev.RecurrenceSet {
+		if strings.TrimSpace(ev.Recurrence) != "" && ev.TimeZone == "" {
+			ev.TimeZone = ev.Start.Location().String()
+		}
+		if ev.RecurrenceUnsupported {
+			return fmt.Errorf("owa: native event recurrence cannot be safely replaced")
+		}
+		recurrence, err := eventRecurrenceToOWA(ev)
+		if err != nil {
+			return err
+		}
+		if recurrence == nil {
+			updates = append(updates, map[string]any{"__type": "DeleteItemField:#Exchange", "Path": propURI("Recurrence")})
+		} else {
+			updates = setField(updates, "CalendarItem", "Recurrence", calItem("Recurrence", recurrence))
+		}
 	}
 	if ev.Summary != "" {
 		updates = setField(updates, "CalendarItem", "Subject", calItem("Subject", ev.Summary))
@@ -404,6 +359,9 @@ func (p *provider) UpdateEvent(ctx context.Context, ev bridge.Event) error {
 		"ConflictResolution": "AlwaysOverwrite", "MessageDisposition": "SaveOnly",
 		"SendCalendarInvitationsOrCancellations": "SendToNone", "SuppressReadReceipts": true,
 	})
+	if ev.RecurrenceSet {
+		req["Header"] = hdrWithTZ(bridge.ToWindowsZone(ev.TimeZone))
+	}
 	_, err := p.call(ctx, "UpdateItem", req)
 	return err
 }

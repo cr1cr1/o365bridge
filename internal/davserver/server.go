@@ -792,7 +792,7 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 						tk.Start, tk.StartDateOnly = nil, false
 					}
 				}
-				if sameTaskRule(tk.Recur, taskCalendarRule(ex)) && sameTaskAnchor(tk.RecurStart, ex.RecurStart) && tk.RecurTimeZone == ex.RecurTimeZone {
+				if sameRecurrenceRule(tk.Recur, taskCalendarRule(ex)) && sameTaskAnchor(tk.RecurStart, ex.RecurStart) && tk.RecurTimeZone == ex.RecurTimeZone {
 					tk.RecurSet, tk.Recur = false, ex.Recur
 				}
 				tk.ID = ex.ID
@@ -859,6 +859,11 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 					return
 				}
 			}
+			ev, err = prepareEventRepeatUpdate(ev, ex)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+				return
+			}
 			ev.ID = ex.ID
 			// RespondEvent choice: when the PUT changes the local
 			// user's PARTSTAT on an event organised by someone else,
@@ -869,6 +874,10 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 			// the client intended. Other-field edits in the same PUT
 			// are therefore not applied in this case.
 			if resp, changed := partstatChange(ex, ev, email); changed {
+				if ev.RecurrenceSet {
+					http.Error(w, "send an invitation response separately from recurrence edits", http.StatusUnprocessableEntity)
+					return
+				}
 				if err := h.call(ctx, email, func(c context.Context, p bridge.Provider) error {
 					return p.RespondEvent(c, collID, ex.ID, resp)
 				}); err != nil {
@@ -884,13 +893,20 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 				h.upstreamErr(w, email, err)
 				return
 			}
-			w.Header().Set("ETag", etag(ev.ID, generateEventICalendar(ev)))
+			// Native recurrence defaults may normalize; GET owns the canonical validator.
+			if ev.Recurrence == "" && ex.Recurrence == "" && !ex.RecurrenceUnsupported {
+				w.Header().Set("ETag", etag(ev.ID, generateEventICalendar(ev)))
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 	}
 	if len(ifMatch) > 0 {
 		w.WriteHeader(http.StatusPreconditionFailed)
+		return
+	}
+	if ev.RecurrenceUnsupported {
+		http.Error(w, "unsupported native repetition cannot be created", http.StatusUnprocessableEntity)
 		return
 	}
 	var created bridge.Event
@@ -905,7 +921,9 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 	if created.ID != "" {
 		ev.ID = created.ID
 	}
-	w.Header().Set("ETag", etag(ev.ID, generateEventICalendar(ev)))
+	if ev.Recurrence == "" {
+		w.Header().Set("ETag", etag(ev.ID, generateEventICalendar(ev)))
+	}
 	w.WriteHeader(http.StatusCreated)
 }
 

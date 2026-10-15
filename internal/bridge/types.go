@@ -113,22 +113,24 @@ type Attendee struct {
 
 // Event is a calendar event in provider-neutral form.
 type Event struct {
-	ID          string
-	CalendarID  string
-	UID         string // iCalendar UID
-	Summary     string
-	Description string
-	Location    string
-	Categories  []string // nil = not supplied; non-nil empty = clear on provider update
-	Start       time.Time
-	End         time.Time
-	AllDay      bool
-	TimeZone    string // IANA name, "" = floating/UTC as given
-	Organizer   string
-	Attendees   []Attendee
-	Recurrence  string // iCalendar RRULE value, "" = none
-	ReminderMin *int   // minutes before start, nil = none
-	Sequence    int
+	ID                    string
+	CalendarID            string
+	UID                   string // iCalendar UID
+	Summary               string
+	Description           string
+	Location              string
+	Categories            []string // nil = not supplied; non-nil empty = clear on provider update
+	Start                 time.Time
+	End                   time.Time
+	AllDay                bool
+	TimeZone              string // IANA name, "" = floating/UTC as given
+	Organizer             string
+	Attendees             []Attendee
+	Recurrence            string // iCalendar RRULE value, "" = none
+	RecurrenceSet         bool   // updates change recurrence only when true; creation uses Recurrence directly
+	RecurrenceUnsupported bool   // native rule cannot be represented faithfully; preserve on unrelated edits
+	ReminderMin           *int   // minutes before start, nil = none
+	Sequence              int
 }
 
 // Task is a to-do item in provider-neutral form.

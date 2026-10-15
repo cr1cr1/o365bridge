@@ -121,6 +121,7 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 	var ev *bridge.Event
 	var tk *bridge.Task
 	sawCal := false
+	eventRuleSeen := false
 	flush := func() {
 		if ev != nil {
 			events = append(events, *ev)
@@ -155,8 +156,9 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 				comp = "VCALENDAR"
 			case "VEVENT":
 				flush()
-				// A CalDAV PUT is a full representation; omitted categories are cleared.
-				ev = &bridge.Event{Categories: []string{}}
+				// A CalDAV PUT is a full representation; omitted categories/repetition are cleared.
+				ev = &bridge.Event{Categories: []string{}, RecurrenceSet: true}
+				eventRuleSeen = false
 				comp = "VEVENT"
 			case "VTODO":
 				flush()
@@ -181,6 +183,25 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 		switch comp {
 		case "VEVENT":
 			if ev != nil {
+				if prop.Name == "RDATE" || prop.Name == "EXDATE" || prop.Name == "RECURRENCE-ID" {
+					return nil, nil, fmt.Errorf("davserver: event recurrence exceptions are not supported")
+				}
+				if prop.Name == "RRULE" {
+					if eventRuleSeen || strings.TrimSpace(prop.Value) == "" {
+						return nil, nil, fmt.Errorf("davserver: empty or duplicate event RRULE")
+					}
+					eventRuleSeen = true
+				}
+				if prop.Name == "DTSTART" || prop.Name == "DTEND" {
+					if parsed, _ := parseDateTime(prop); parsed.IsZero() {
+						return nil, nil, fmt.Errorf("davserver: invalid event date")
+					}
+					if zone := prop.Params["TZID"]; zone != "" {
+						if _, err := time.LoadLocation(zone); err != nil {
+							return nil, nil, fmt.Errorf("davserver: unsupported event timezone")
+						}
+					}
+				}
 				applyEventProp(ev, prop)
 			}
 		case "VTODO":
@@ -195,6 +216,11 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 	flush()
 	if !sawCal {
 		return nil, nil, fmt.Errorf("davserver: not an iCalendar object")
+	}
+	for _, event := range events {
+		if event.Recurrence != "" && event.Start.IsZero() {
+			return nil, nil, fmt.Errorf("davserver: recurring event requires DTSTART")
+		}
 	}
 	for _, task := range tasks {
 		for _, value := range []*time.Time{task.Start, task.Due, task.Completed} {
@@ -309,11 +335,15 @@ func applyEventProp(ev *bridge.Event, p icalProp) {
 		ev.Start, ev.AllDay = parseDateTime(p)
 		if tz := p.Params["TZID"]; tz != "" {
 			ev.TimeZone = tz
+		} else if !ev.AllDay && strings.HasSuffix(strings.ToUpper(p.Value), "Z") {
+			ev.TimeZone = "UTC"
 		}
 	case "DTEND":
 		ev.End, _ = parseDateTime(p)
 	case "RRULE":
 		ev.Recurrence = p.Value
+	case "X-O365BRIDGE-RECUR-UNSUPPORTED":
+		ev.RecurrenceUnsupported, _ = strconv.ParseBool(p.Value)
 	case "ORGANIZER":
 		ev.Organizer = stripMailto(unescapeText(p.Value))
 	case "ATTENDEE":
@@ -417,10 +447,25 @@ func generateEventICalendar(ev bridge.Event) []byte {
 	// Deterministic DTSTAMP (derived from Start) keeps the generated
 	// bytes — and therefore the ETag derived from them — stable.
 	lines = append(lines, "DTSTAMP:"+dtstamp(ev.Start))
+	zone := ""
+	if ev.Recurrence != "" || ev.RecurrenceUnsupported {
+		if loc, err := time.LoadLocation(bridge.FromWindowsZone(ev.TimeZone)); ev.TimeZone != "" && err == nil {
+			ev.Start, ev.End = ev.Start.In(loc), ev.End.In(loc)
+			if eventRepeatZone(ev) != "UTC" && !ev.AllDay {
+				zone = loc.String()
+			}
+		}
+	}
 	if ev.AllDay {
 		lines = append(lines, "DTSTART;VALUE=DATE:"+fmtDateTime(ev.Start, true))
 		if !ev.End.IsZero() {
 			lines = append(lines, "DTEND;VALUE=DATE:"+fmtDateTime(ev.End, true))
+		}
+	} else if zone != "" {
+		// shortcut: IANA TZIDs rely on client tzdata; add VTIMEZONE for clients without it.
+		lines = append(lines, "DTSTART;TZID="+zone+":"+ev.Start.Format("20060102T150405"))
+		if !ev.End.IsZero() {
+			lines = append(lines, "DTEND;TZID="+zone+":"+ev.End.Format("20060102T150405"))
 		}
 	} else {
 		lines = append(lines, "DTSTART:"+fmtDateTime(ev.Start, false))
@@ -446,6 +491,9 @@ func generateEventICalendar(ev bridge.Event) []byte {
 	}
 	if ev.Recurrence != "" {
 		lines = append(lines, "RRULE:"+strings.TrimPrefix(ev.Recurrence, "RRULE:"))
+	}
+	if ev.RecurrenceUnsupported {
+		lines = append(lines, "X-O365BRIDGE-RECUR-UNSUPPORTED:TRUE")
 	}
 	if ev.Organizer != "" {
 		lines = append(lines, "ORGANIZER:"+mailto(ev.Organizer))

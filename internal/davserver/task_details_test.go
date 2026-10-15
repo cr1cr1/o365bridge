@@ -81,10 +81,10 @@ func TestTaskUnrelatedEditPreservesRemindersProgressAndWirePrecision(t *testing.
 }
 
 func TestTaskRuleOrderingDoesNotRewriteNativeRepeat(t *testing.T) {
-	if !sameTaskRule("FREQ=WEEKLY;BYDAY=WE,MO;WKST=MO", "BYDAY=MO,WE;INTERVAL=1;FREQ=WEEKLY") {
+	if !sameRecurrenceRule("FREQ=WEEKLY;BYDAY=WE,MO;WKST=MO", "BYDAY=MO,WE;INTERVAL=1;FREQ=WEEKLY") {
 		t.Fatal("equivalent weekday/rule ordering not recognized")
 	}
-	if sameTaskRule("FREQ=DAILY;COUNT=3", "FREQ=DAILY;COUNT=4") || sameTaskRule("FREQ=DAILY;FREQ=DAILY", "FREQ=DAILY") {
+	if sameRecurrenceRule("FREQ=DAILY;COUNT=3", "FREQ=DAILY;COUNT=4") || sameRecurrenceRule("FREQ=DAILY;FREQ=DAILY", "FREQ=DAILY") {
 		t.Fatal("changed or duplicate rule treated as unchanged")
 	}
 }

@@ -456,7 +456,11 @@ Time zones are handled centrally: IANA↔Windows zone ID conversion
 lives in `internal/bridge` and is applied by both providers (OWA
 rejects IANA IDs outright; Graph returns Windows names for
 Outlook-created events). OWA event times are sent as wall-clock
-times in the event zone with a `TimeZoneContext` header. Per-account
+times in the event zone with a `TimeZoneContext` header. Reverse Windows IDs
+use pinned CLDR territory-001 canonical defaults where alphabetical aliases
+would choose a different zone (including no-DST aliases); existing forward
+aliases/legacy fallbacks remain approximate, not a universal lossless roundtrip.
+Per-account
 operation logging (auth, append/copy/move, sends, DAV mutations,
 upstream failures as warnings) is implemented in the downstream
 servers.
@@ -537,18 +541,38 @@ Known fidelity limits, all explicit rather than silent:
   Task recurrence/exception and reminder/progress mapping is still a subset.
 
 - **Calendar UID/recurrence identity:** distinct cloud items sharing a nonempty
-  UID can produce the same DAV resource URL. Recurring masters are still filtered
-  by their initial start/end; recurrence-ID and exception representation are
-  incomplete. Live missing-event diagnosis must distinguish independent records
-  from series occurrences before changing UIDs; debug counters reveal duplicate
-  UIDs and date-filtered records without exposing event contents.
+  UID can produce the same DAV resource URL. OWA recurring masters are still
+  filtered by their initial start/end; recurrence-ID and exception representation
+  are incomplete. Graph reads native single events/masters via `/events`, not
+  expanded calendarView rows; masters are conservatively included for client
+  expansion, not exact occurrence-window matching. Native UID relationships and
+  initial client/cloud identity compatibility are not rewritten by this repair.
+  Live diagnosis must distinguish independent records from occurrences before
+  changing UIDs; debug counters expose counts, not event contents.
 
-- **Event recurrence on write:** Graph event RRULE conversion remains absent,
-  and OWA event conversion remains minimal. Task repetition now has separate
-  strict OWA/Graph codecs for common native patterns/ranges; unsupported rules,
-  completion-relative regeneration and ambiguous timezone cutoffs are preserved
-  or explicitly rejected instead of silently changed. Native month-end/leap-day
-  expansion and real tenant date display remain owner-run acceptance checks.
+- **Event recurrence:** common scheduled patterns/ranges now have native OWA and
+  Graph mapping. OWA requires native default interval/selectors; explicit series
+  edits set/delete the native field and Graph PATCH uses structured/null recurrence.
+  Event-specific local anchors/UNTIL conversion wrap existing pure pattern helpers
+  without changing task behavior. Native ID is required after creation. Unsupported
+  patterns are preserved on unrelated edits, never invented as monthly. Absolute
+  monthly days 29–31 and yearly leap/invalid dates are conservatively unsupported
+  because native clamping differs from RFC skipping; OWA interval limits are
+  enforced. Recurrence exceptions and multiple RRULEs reject before mutation.
+  Native Graph read defaults/sentinels are normalized without relaxing writes.
+  DAV retains IANA wall-time TZIDs (client tzdata required; no custom/generated
+  VTIMEZONE), restores all-day native zones, and skips unchanged rule writes using
+  bounded anchor/default/ordinal comparison. Mixed invitation replies and repeat
+  edits reject before RespondEvent. Series PUT validators are omitted until a fresh
+  canonical GET, preventing immediately stale ETags after native normalization.
+  The limited JMAP adapter rejects selectors/overrides it cannot translate; full
+  JMAP recurrence editing is not newly enabled. Live tenant/client expansion and
+  native date-display acceptance remain owner-run checks.
+
+- **Task recurrence:** separate scheduled-pattern semantics and explicit update
+  intent remain unchanged. Completion-relative regeneration, exceptions and
+  ambiguous cutoff behavior are still unsupported/preserved as documented in
+  the task-detail work; event-only clamping/interval guards do not alter tasks.
 - **OWA large mail:** sends always use one `MimeContent` payload;
   `_o`'s >4MB attachment-splitting upload path is not implemented.
 - **Graph append is non-atomic:** create-draft → move → flag PATCH;

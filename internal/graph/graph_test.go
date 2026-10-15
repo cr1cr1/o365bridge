@@ -480,7 +480,7 @@ func TestHTTPErrorClassification(t *testing.T) {
 // as its Windows name with wall-clock times.
 func TestEventWindowsTimeZoneConversion(t *testing.T) {
 	f := newFake(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
-		if r.Method == "GET" && strings.Contains(r.URL.Path, "calendarview") {
+		if r.Method == "GET" && r.URL.Path == "/v1.0/me/calendars/cal1/events" {
 			jsonOut(w, 200, `{"value":[{"id":"ev9","iCalUId":"u9","subject":"Zoned","start":{"dateTime":"2026-10-14T11:44:00","timeZone":"E. Europe Standard Time"},"end":{"dateTime":"2026-10-14T12:44:00","timeZone":"E. Europe Standard Time"}}]}`)
 			return
 		}
@@ -497,8 +497,8 @@ func TestEventWindowsTimeZoneConversion(t *testing.T) {
 	if err != nil || len(evs) != 1 {
 		t.Fatalf("events %v %v", evs, err)
 	}
-	if evs[0].TimeZone != "Europe/Bucharest" {
-		t.Fatalf("TimeZone = %q, want Europe/Bucharest", evs[0].TimeZone)
+	if evs[0].TimeZone != "Europe/Chisinau" {
+		t.Fatalf("TimeZone = %q, want Europe/Chisinau", evs[0].TimeZone)
 	}
 	if want := time.Date(2026, 10, 14, 8, 44, 0, 0, time.UTC); !evs[0].Start.Equal(want) {
 		t.Fatalf("Start = %v, want %v (11:44 EEST)", evs[0].Start, want)
@@ -628,8 +628,8 @@ func TestListEventsMapping(t *testing.T) {
 	if len(evs[0].Attendees) != 1 || evs[0].Attendees[0].Status != "accepted" {
 		t.Errorf("attendees %+v", evs[0].Attendees)
 	}
-	if !strings.Contains(f.last().Query, "startDateTime") && !strings.Contains(f.last().Query, "%24filter") {
-		t.Errorf("time range query %s path %s", f.last().Query, f.last().Path)
+	if f.last().Path != "/v1.0/me/calendars/cal1/events" || strings.Contains(f.last().Query, "startDateTime") || strings.Contains(f.last().Query, "endDateTime") || strings.Contains(f.last().Query, "%24filter") {
+		t.Errorf("native event source query %s path %s", f.last().Query, f.last().Path)
 	}
 }
 

@@ -1,0 +1,9 @@
+# Reflection
+
+The requested order was useful: contextual trace first, upstream boundary evidence second, then native recurrence repair. The historical no-bodies policy was changed only by the owner's explicit trace request; credentials stayed excluded. Bounding raw capture is not enough for safe tracing: incomplete JSON and reversible MIME/file blobs need explicit omission, while URL-encoded/session echoes must be scrubbed before output limits.
+
+Recurrence bugs were not fixed by inventing a series/exception engine. The existing converters were missing mandatory native fields, dropping selectors or not writing repetition at all. Thin event wrappers reused pure scheduled-pattern code but isolated event calendar dates, inclusive cutoffs and native clamping from task semantics. A shared timezone owner correction prevented deterministic-but-wrong no-DST reverse aliases.
+
+Green tests alone were insufficient when their fake Graph responses described masters on an occurrence-only route or omitted normal native defaults. Independent contract review added complete Microsoft response fixtures and corrected the canonical read source. The same review caught invalid recurrence partially sending invitation responses and native normalization invalidating the PUT-returned validator. Rejecting mixed mutations and omitting optional unnormalized ETags were smaller and safer than new preflight APIs or post-write reads that could fail after success.
+
+Final evidence covers local real HTTP/socket/handler boundaries, race repetitions, vet and build. It does not prove the exact tenant symptom or live client expansion. Native exceptions, identity persistence and broader recurrence algebra remain explicit limits; data must not be silently rewritten to make a test or client display look successful.

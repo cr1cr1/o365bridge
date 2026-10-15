@@ -66,13 +66,13 @@ func TestGraphEventCategoriesWrite(t *testing.T) {
 
 func TestGraphEventCategoriesRead(t *testing.T) {
 	f := newFake(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
-		if r.Method != http.MethodGet || r.URL.Path != "/v1.0/me/calendars/cal1/calendarview" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1.0/me/calendars/cal1/events" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		jsonOut(w, http.StatusOK, `{"value":[
 			{"id":"ev1","iCalUId":"uid1","categories":["Work","Team, one","Semi;colon","Back\\slash","项目"],"start":{"dateTime":"2026-06-01T10:00:00","timeZone":"UTC"},"end":{"dateTime":"2026-06-01T11:00:00","timeZone":"UTC"}},
-			{"id":"ev2","categories":[]},
-			{"id":"ev3"}
+			{"id":"ev2","categories":[],"start":{"dateTime":"2026-06-01T12:00:00","timeZone":"UTC"},"end":{"dateTime":"2026-06-01T13:00:00","timeZone":"UTC"}},
+			{"id":"ev3","start":{"dateTime":"2026-06-01T14:00:00","timeZone":"UTC"},"end":{"dateTime":"2026-06-01T15:00:00","timeZone":"UTC"}}
 		]}`)
 	})
 	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)

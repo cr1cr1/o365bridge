@@ -379,7 +379,7 @@ func TestEventFromItemConvertsWindowsTimeZone(t *testing.T) {
 	item := map[string]any{
 		"ItemId": map[string]any{"Id": "e1"}, "Subject": "Tz",
 		"Start": "2026-10-14T11:44:00", "End": "2026-10-14T12:44:00",
-		"StartTimeZone": map[string]any{"Id": "E. Europe Standard Time"},
+		"StartTimeZone": map[string]any{"Id": "GTB Standard Time"},
 	}
 	ev := eventFromItem(item, "calendar")
 	if ev.TimeZone != "Europe/Bucharest" {
