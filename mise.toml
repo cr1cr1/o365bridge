@@ -5,3 +5,6 @@ go = '1.27'
 "goreleaser" = '2.18'
 ## https://github.com/golangci/golangci-lint/releases
 "golangci-lint" = '2.13'
+
+## https://github.com/F1bonacc1/process-compose/releases
+"github:F1bonacc1/process-compose" = "latest"

@@ -1,0 +1,43 @@
+version: "0.5"
+is_strict: true
+ordered_shutdown: true
+log_configuration:
+  disable_json: true
+  flush_each_line: true
+  rotation:
+    max_size_mb: 50
+    max_age_days: 14
+    max_backups: 3
+    compress: true
+
+processes:
+  build:
+    namespace: &namespace o365bridge
+    description: "dist build with goreleaser"
+    command: "goreleaser build --clean --snapshot --single-target --output dist/o365bridge"
+    availability:
+      restart: "no"
+    log_location: "tmp/logs/build.log"
+    watch:
+      debounce: 5s
+      paths:
+        - path: .
+          include: ["*.go", "go.mod", "go.sum"]
+
+  run:
+    namespace: *namespace
+    description: "run the program"
+    command: "dist/o365bridge serve --password a --log-level trace"
+    depends_on:
+      build:
+        condition: process_completed_successfully
+    availability:
+      restart: "on_failure"
+      backoff_seconds: 1
+    log_location: "tmp/logs/run.log"
+    watch:
+      debounce: 1s
+      disable_default_excludes: true
+      paths:
+        - path: dist
+          include: ["o365bridge"]
