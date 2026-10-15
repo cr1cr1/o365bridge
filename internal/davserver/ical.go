@@ -11,13 +11,14 @@ import (
 
 // --- minimal iCalendar (RFC 5545 subset) codec ---
 // Supports VEVENT and VTODO as mapped to bridge.Event / bridge.Task.
-// VALARM and unknown components/properties are ignored on parse.
+// Task DISPLAY alarms map to native reminders; event alarms remain ignored.
 // TEXT escaping and 75-octet line folding are handled both ways.
 
 type icalProp struct {
-	Name   string
-	Params map[string]string
-	Value  string
+	Name          string
+	Params        map[string]string
+	Value         string
+	invalidParams bool // Task alarms must not lose malformed or duplicate parameters.
 }
 
 func escapeText(s string) string {
@@ -122,8 +123,16 @@ func parseProp(line string) (icalProp, bool) {
 	p := icalProp{Name: strings.ToUpper(parts[0]), Params: map[string]string{}, Value: line[colon+1:]}
 	for _, kv := range parts[1:] {
 		k, v, ok := strings.Cut(kv, "=")
+		k = strings.ToUpper(k)
+		_, duplicate := p.Params[k]
+		if !ok || k == "" || strings.ContainsAny(k, " \t\"") || v == "" || duplicate {
+			p.invalidParams = true
+		}
+		if strings.Contains(v, `"`) && (len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' || strings.Contains(v[1:len(v)-1], `"`)) {
+			p.invalidParams = true
+		}
 		if ok {
-			p.Params[strings.ToUpper(k)] = strings.Trim(v, `"`)
+			p.Params[k] = strings.Trim(v, `"`)
 		}
 	}
 	return p, true
@@ -139,12 +148,18 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 	var tk *bridge.Task
 	sawCal := false
 	eventRuleSeen := false
-	flush := func() {
+	var alarm taskAlarm
+	flush := func() error {
 		if ev != nil {
 			events = append(events, *ev)
 			ev = nil
 		}
 		if tk != nil {
+			reminder, err := alarm.reminder()
+			if err != nil {
+				return err
+			}
+			tk.Reminder = reminder
 			if tk.RecurAnchorOnly && tk.Start != nil {
 				if tk.RecurStart == nil {
 					tk.RecurStart = tk.Start
@@ -155,6 +170,7 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 			tasks = append(tasks, *tk)
 			tk = nil
 		}
+		return nil
 	}
 	for _, line := range unfold(data) {
 		if line == "" {
@@ -162,33 +178,62 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 		}
 		prop, ok := parseProp(line)
 		if !ok {
+			if tk != nil && comp == "VALARM" {
+				return nil, nil, fmt.Errorf("davserver: malformed task alarm property")
+			}
 			continue
 		}
 		switch prop.Name {
 		case "BEGIN":
+			next := strings.ToUpper(prop.Value)
+			if tk != nil && (comp == "VALARM" || next == "VTODO" || next == "VEVENT" || next == "VCALENDAR") {
+				return nil, nil, fmt.Errorf("davserver: invalid task alarm nesting")
+			}
+			if next == "VALARM" && tk != nil {
+				if len(prop.Params) != 0 || prop.invalidParams {
+					return nil, nil, fmt.Errorf("davserver: invalid task alarm boundary")
+				}
+				if comp != "VTODO" || alarm.seen {
+					return nil, nil, fmt.Errorf("davserver: expected one direct task alarm")
+				}
+				alarm.seen = true
+			}
 			parents = append(parents, comp)
 			switch strings.ToUpper(prop.Value) {
 			case "VCALENDAR":
 				sawCal = true
 				comp = "VCALENDAR"
 			case "VEVENT":
-				flush()
+				if err := flush(); err != nil {
+					return nil, nil, err
+				}
 				// A CalDAV PUT is a full representation; omitted categories/repetition are cleared.
 				ev = &bridge.Event{Categories: []string{}, RecurrenceSet: true}
 				eventRuleSeen = false
 				comp = "VEVENT"
 			case "VTODO":
-				flush()
+				if err := flush(); err != nil {
+					return nil, nil, err
+				}
 				tk = &bridge.Task{FullUpdate: true, RecurSet: true, Categories: []string{}}
+				alarm = taskAlarm{}
 				comp = "VTODO"
 			default: // VALARM etc: ignored
 				comp = strings.ToUpper(prop.Value)
 			}
 			continue
 		case "END":
+			if tk != nil && comp == "VALARM" && (len(prop.Params) != 0 || prop.invalidParams) {
+				return nil, nil, fmt.Errorf("davserver: invalid task alarm boundary")
+			}
+			if tk != nil && !strings.EqualFold(prop.Value, comp) {
+				return nil, nil, fmt.Errorf("davserver: unterminated or mismatched task component")
+			}
 			switch strings.ToUpper(prop.Value) {
 			case "VEVENT", "VTODO", "VCALENDAR":
-				flush()
+				if err := flush(); err != nil {
+					return nil, nil, err
+				}
 			}
 			comp = ""
 			if len(parents) > 0 {
@@ -226,11 +271,27 @@ func parseICalendar(data []byte) ([]bridge.Event, []bridge.Task, error) {
 				if prop.Name == "RDATE" || prop.Name == "EXDATE" || prop.Name == "RECURRENCE-ID" {
 					return nil, nil, fmt.Errorf("davserver: task recurrence exceptions are not supported")
 				}
+				if prop.Name == "DTSTART" {
+					alarm.starts = append(alarm.starts, prop)
+				} else if prop.Name == "DUE" {
+					alarm.dues = append(alarm.dues, prop)
+				}
 				applyTaskProp(tk, prop)
+			}
+		case "VALARM":
+			if tk != nil {
+				if err := alarm.apply(prop); err != nil {
+					return nil, nil, err
+				}
 			}
 		}
 	}
-	flush()
+	if tk != nil && comp != "VTODO" {
+		return nil, nil, fmt.Errorf("davserver: unterminated task alarm")
+	}
+	if err := flush(); err != nil {
+		return nil, nil, err
+	}
 	if !sawCal {
 		return nil, nil, fmt.Errorf("davserver: not an iCalendar object")
 	}
@@ -606,6 +667,9 @@ func generateTaskICalendar(tk bridge.Task) []byte {
 	}
 	if tk.RecurUnsupported {
 		lines = append(lines, "X-O365BRIDGE-RECUR-UNSUPPORTED:TRUE")
+	}
+	if tk.Reminder != nil {
+		lines = append(lines, "BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:Task reminder", "TRIGGER;VALUE=DATE-TIME:"+fmtDateTime(*tk.Reminder, false), "END:VALARM")
 	}
 	lines = append(lines, "END:VTODO", "END:VCALENDAR")
 	return joinCRLF(lines)

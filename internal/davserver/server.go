@@ -878,8 +878,11 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 				}
 				tk.BodyUnchanged = sameTaskNote(tk.Body, ex.Body)
 				tk.StatusUnchanged = tk.Status == ex.Status && sameTaskTime(tk.Completed, ex.Completed)
-				// The task codec cannot edit alarms yet; do not erase a native reminder.
-				tk.Reminder = ex.Reminder
+				// The wire has second precision; preserve an unchanged native instant exactly.
+				tk.ReminderUnchanged = sameTaskTime(tk.Reminder, ex.Reminder)
+				if tk.ReminderUnchanged {
+					tk.Reminder = ex.Reminder
+				}
 				// Preserve the native repeat anchor if a client omits bridge metadata.
 				if tk.Recur != "" && tk.RecurStart == nil {
 					tk.RecurStart, tk.RecurTimeZone = ex.RecurStart, ex.RecurTimeZone

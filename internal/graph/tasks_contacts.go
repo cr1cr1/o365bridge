@@ -189,6 +189,10 @@ func taskJSON(t bridge.Task, update bool) (map[string]any, error) {
 		delete(m, "status")
 		delete(m, "completedDateTime")
 	}
+	if update && t.ReminderUnchanged {
+		delete(m, "isReminderOn")
+		delete(m, "reminderDateTime")
+	}
 	return m, nil
 }
 

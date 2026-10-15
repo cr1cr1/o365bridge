@@ -807,11 +807,13 @@ func (p *provider) UpdateTask(ctx context.Context, t bridge.Task) error {
 	if !t.StatusUnchanged && (t.FullUpdate || t.Status != "" || t.Completed != nil) {
 		updates = setField(updates, "Task", "TaskPercentComplete", taskItem("PercentComplete", item["PercentComplete"]))
 	}
-	if t.Reminder != nil {
-		updates = setField(updates, "Task", "ReminderIsSet", taskItem("ReminderIsSet", true))
-		updates = setField(updates, "Task", "ReminderDueBy", taskItem("ReminderDueBy", item["ReminderDueBy"]))
-	} else if t.FullUpdate {
-		updates = setField(updates, "Task", "ReminderIsSet", taskItem("ReminderIsSet", false))
+	if !t.ReminderUnchanged {
+		if t.Reminder != nil {
+			updates = setField(updates, "Task", "ReminderIsSet", taskItem("ReminderIsSet", true))
+			updates = setField(updates, "Task", "ReminderDueBy", taskItem("ReminderDueBy", item["ReminderDueBy"]))
+		} else if t.FullUpdate {
+			updates = setField(updates, "Task", "ReminderIsSet", taskItem("ReminderIsSet", false))
+		}
 	}
 	if t.RecurSet {
 		if recurrence != nil {

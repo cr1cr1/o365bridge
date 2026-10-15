@@ -6,4 +6,6 @@ The second bug needed native semantics, not title-based deduplication. Microsoft
 
 That added write exposed an authentication retry boundary: a metadata failure after native success must not replay the whole edit. A real HTTP401/Registry regression—not an unclassified service-code fake—proved the unsafe replay and the targeted guard.
 
-No cloud rows were deleted, no local content store was added, and no date precision was guessed to make tests green. Legacy ownership and strict date-representation limits remain explicit rather than disguised as full fidelity.
+The reminder follow-up belonged at the missing protocol seam, not in a new provider API: both backends already supported one reminder instant, but the codec discarded alarms and the handler forcibly restored the old value. Strict single-alarm validation and explicit timezone arithmetic prevent guessing unsupported semantics. Precision preservation required omitting unchanged native writes, not merely restoring a high-precision pointer before a millisecond serializer.
+
+No cloud rows were deleted, no local content store was added, and no date precision was guessed to make tests green. Legacy ownership, strict date-representation and single-reminder limits remain explicit rather than disguised as full fidelity.

@@ -135,30 +135,31 @@ type Event struct {
 
 // Task is a to-do item in provider-neutral form.
 type Task struct {
-	ID               string
-	ListID           string
-	UID              string
-	Title            string
-	Body             string
-	Start            *time.Time
-	Due              *time.Time
-	Completed        *time.Time
-	Priority         int // iCalendar 1 (high) .. 9 (low), 0/5 = normal
-	Reminder         *time.Time
-	Recur            string           // iCalendar RRULE value, "" = none
-	Status           string           // "needs-action", "in-process", "completed"
-	Categories       []string         // nil = unsupplied, non-nil empty = clear
-	Attachments      []TaskAttachment // native files; content is fetched on demand
-	StartDateOnly    bool
-	DueDateOnly      bool
-	FullUpdate       bool       // full VTODO replacement; absent nullable fields may be cleared
-	BodyUnchanged    bool       // preserve native rich-text notes on unrelated edits
-	StatusUnchanged  bool       // preserve native progress/state that VTODO cannot fully represent
-	RecurSet         bool       // explicit repeat update or removal
-	RecurStart       *time.Time // native repeat range anchor, not the task start date
-	RecurTimeZone    string
-	RecurUnsupported bool // preserve unrepresentable native repetition on ordinary edits
-	RecurAnchorOnly  bool // DAV DTSTART represents the repeat anchor, not a native start date
+	ID                string
+	ListID            string
+	UID               string
+	Title             string
+	Body              string
+	Start             *time.Time
+	Due               *time.Time
+	Completed         *time.Time
+	Priority          int // iCalendar 1 (high) .. 9 (low), 0/5 = normal
+	Reminder          *time.Time
+	Recur             string           // iCalendar RRULE value, "" = none
+	Status            string           // "needs-action", "in-process", "completed"
+	Categories        []string         // nil = unsupplied, non-nil empty = clear
+	Attachments       []TaskAttachment // native files; content is fetched on demand
+	StartDateOnly     bool
+	DueDateOnly       bool
+	FullUpdate        bool       // full VTODO replacement; absent nullable fields may be cleared
+	BodyUnchanged     bool       // preserve native rich-text notes on unrelated edits
+	StatusUnchanged   bool       // preserve native progress/state that VTODO cannot fully represent
+	ReminderUnchanged bool       // omit reminder writes when its second-precision DAV projection is unchanged
+	RecurSet          bool       // explicit repeat update or removal
+	RecurStart        *time.Time // native repeat range anchor, not the task start date
+	RecurTimeZone     string
+	RecurUnsupported  bool // preserve unrepresentable native repetition on ordinary edits
+	RecurAnchorOnly   bool // DAV DTSTART represents the repeat anchor, not a native start date
 }
 
 // TaskAttachment describes a native task file without exposing upstream credentials.

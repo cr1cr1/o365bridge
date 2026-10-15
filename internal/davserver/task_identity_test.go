@@ -39,12 +39,12 @@ func TestDAVTasksWithMissingUIDKeepCloudIdentity(t *testing.T) {
 }
 
 func TestVTODOFieldsAfterAlarmAreParsed(t *testing.T) {
-	data := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:task-alarm\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Alarm only\r\nEND:VALARM\r\nSUMMARY:Task after alarm\r\nDUE:20260602T100000Z\r\nPRIORITY:1\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+	data := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:task-alarm\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Alarm only\r\nTRIGGER;VALUE=DATE-TIME:20260602T090000Z\r\nEND:VALARM\r\nSUMMARY:Task after alarm\r\nDUE:20260602T100000Z\r\nPRIORITY:1\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
 	events, tasks, err := parseICalendar([]byte(data))
 	if err != nil || len(events) != 0 || len(tasks) != 1 {
 		t.Fatalf("parse=%+v %+v %v", events, tasks, err)
 	}
-	if tasks[0].Title != "Task after alarm" || tasks[0].Due == nil || tasks[0].Due.Hour() != 10 || tasks[0].Priority != 1 || tasks[0].Body != "" {
+	if tasks[0].Title != "Task after alarm" || tasks[0].Due == nil || tasks[0].Due.Hour() != 10 || tasks[0].Priority != 1 || tasks[0].Body != "" || tasks[0].Reminder == nil || tasks[0].Reminder.UTC().Format("20060102T150405Z") != "20260602T090000Z" {
 		t.Fatalf("fields after VALARM lost or alarm content leaked: %+v", tasks[0])
 	}
 }

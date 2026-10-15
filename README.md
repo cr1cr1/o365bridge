@@ -281,9 +281,21 @@ rich formatting upstream. Quoted iCalendar parameters such as Thunderbird's
 ALTREP content is not fetched or imported into the upstream body. The same
 quoted-parameter handling applies to event descriptions and contact fields.
 Existing reminders and native progress/state are preserved on unrelated edits
-rather than reset to a guessed value. Reminder editing through VTODO alarms is
-still unsupported. Already-corrupted notes are not automatically rewritten;
-refresh, correct the description, and save it again after upgrading.
+rather than reset to a guessed value. Already-corrupted notes are not automatically
+rewritten; refresh, correct the description, and save it again after upgrading.
+
+Task reminders support **one nonrepeating DISPLAY VALARM**. GET emits its native
+instant as an absolute UTC trigger; a fresh full VTODO PUT can set, change or remove
+it. Omitting the alarm clears the reminder, so synchronize before editing cached
+tasks. An unchanged reminder does not rewrite its native fields, preserving native
+fractional precision even though standard alarm text has whole-second precision.
+Relative START/END triggers require an explicitly zoned date-time DTSTART/DUE;
+calendar days/weeks respect DST rather than becoming fixed 24-hour intervals.
+DATE-only/floating/unknown-zone anchors, ambiguous/nonexistent local times,
+DTSTART+DURATION fallback, repeated or multiple alarms and AUDIO/EMAIL actions
+are rejected instead of silently dropped or assigned a guessed timezone. Custom
+alarm-message and snooze/dismissal fidelity are not represented by the native
+single-instant reminder field; event alarm behavior is unchanged.
 
 Thunderbird DATE-only start/due values retain DATE precision through restart,
 using native task metadata. Existing ISO date/time values remain supported;

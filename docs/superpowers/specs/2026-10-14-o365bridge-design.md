@@ -535,8 +535,24 @@ unsupplied fields. Task If-Match checks precede mutation, and unchanged notes,
 reminders, progress/state and unsupported repeat metadata remain untouched.
 File metadata is listed without fetching bytes; account/list/task/file ownership
 is revalidated for download, including registry recovery. Downloads are bounded
-to 32 MiB, attachment-disposition, nosniff and private/no-store. Upload/delete,
-embedded items/reference links and VTODO alarm editing are not implemented.
+to 32 MiB, attachment-disposition, nosniff and private/no-store. Upload/delete
+and embedded items/reference links are not implemented.
+
+A task's single native reminder now maps to one nonrepeating DISPLAY VALARM.
+Absolute triggers require UTC DATE-TIME; signed duration triggers resolve only
+against an explicitly zoned DTSTART (default/START) or DUE (END), after all task
+properties have been read and before synthetic repeat-anchor cleanup. Days/weeks
+use civil calendar arithmetic before elapsed HMS, respecting ordinary DST changes;
+unresolved fold/gap anchors or nominal targets are rejected rather than guessed.
+DATE-only/floating/unknown-zone anchors, task-DURATION fallback, repeated/multiple
+alarms, malformed cardinality/parameters and non-DISPLAY actions fail before native
+mutation. VEVENT alarm behavior remains unchanged. Task GET emits an absolute UTC
+alarm; a fresh full PUT owns its presence, including explicit omission to clear.
+The transient ReminderUnchanged flag preserves native subsecond precision by
+omitting only reminder update fields in both OWA and Graph; creation and default
+partial/set/clear provider semantics remain unchanged. No new store or auth/API
+channel is introduced. Custom alarm text and snooze state are not modeled.
+
 OWA scheduled task date changes/completion can detach an occurrence while the
 original native ID advances. Both may retain copied client UID and recurrence
 data; `task:IsRecurring` and PSETID_Task Boolean `PidLidTaskDeadOccurrence` (0x8109)

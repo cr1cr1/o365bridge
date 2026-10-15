@@ -58,7 +58,7 @@ func TestTaskUnrelatedEditPreservesRemindersProgressAndWirePrecision(t *testing.
 	p := newFake()
 	start := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
 	completed := start.Add(time.Second + 123*time.Millisecond)
-	reminder := start.Add(time.Hour)
+	reminder := start.Add(time.Hour + 456*time.Millisecond)
 	p.tasks["native"] = bridge.Task{ID: "native", ListID: "tasks1", UID: "task", Title: "Task", Body: "First\r\nSecond", Due: &start, Completed: &completed, Status: "completed", Reminder: &reminder, Recur: "FREQ=DAILY;UNTIL=20261030", RecurStart: &start, RecurTimeZone: "+03:00"}
 	h := newHandler(t, p)
 	path := "/caldav/" + acct + "/tasks1/task.ics"

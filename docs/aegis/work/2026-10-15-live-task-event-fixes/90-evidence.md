@@ -49,6 +49,26 @@ Live user request220 at13:42:51 then successfully SET TaskRecurrence (`NoError`,
 
 User reports a later repeat-removal did not reach cloud. Through the current captured tail, no TaskRecurrence DELETE or native write follows SET323; current native task remains recurring. This does not prove native deletion failed: a downstream precondition/parser rejection or missing client PUT must first be distinguished. Failed DAV mutation statuses currently are not logged, so this remains active diagnosis rather than claimed completion. Reminder editing, exact percentage and attachment upload remain incomplete; no promise of those fields is made.
 
+## Reminder protocol follow-up
+
+Later owner retry at14:43:37 sent TaskRecurrence DELETE84, got native NoError/DAV204, and readback omitted recurrence. The earlier no-provider-write observation was not falsely classified as a native DELETE failure.
+
+The latest user explicitly identified reminder edits as the remaining gap. Task VALARM was ignored and the handler forced preservation of the old value. The new scoped codec maps one DISPLAY alarm to the already-supported reminder instant, and a transient ReminderUnchanged flag prevents invisible precision loss on unrelated edits. Worker scoped DAV/OWA/Graph suites passed; parent native HTTP/DAV test351 passed create/read, 100ns precision with zero note-edit reminder writes, relative END change, explicit clear, and no extra recurrence/creation.
+
+Parent FINAL reminder job357 collected exit0:
+
+```sh
+go test -race ./... -count=1
+go test -race ./internal/davserver ./internal/owa ./internal/graph -count=5
+go vet ./...
+go build -o dist/o365bridge .
+git diff --check
+```
+
+Independent final reviewer952fc578: Ship, no concrete must-/should-fix. Alarm input/cardinality/nesting, timezone/DST/overflow, provider create/update/partial isolation, exact pointer/skip-write preservation and canonical ETags were inspected.
+
+Parent restarted only the existing process-compose run (receipt360 exit0; expected unauthenticated DAV401 listener health, no task request). Owner then selected “Reminder updates correctly.” In the final15:25 runtime window, native UpdateItem21 set ReminderIsSet=true plus ReminderDueBy and returned NoError; GetItem25 returned the same enabled reminder instant. UpdateItem88 changed ReminderDueBy and returned NoError; GetItem91 returned the changed enabled instant. Intervening recurring-task edits34/69 emitted no reminder fields and their readbacks retained the reminder, confirming unrelated-edit preservation against this tenant. The actual task identities/titles and timestamps are not copied here. A live reminder-clear request was not present in this final window; clear is covered by the native HTTP/DAV lifecycle regression, not falsely claimed as live-tested. No appointment-event write was captured.
+
 ## Explicit residual boundaries
 
 Native date edits/completion can intentionally retain a continuing series plus detached cloud occurrence; no row deletion/automatic merge is implemented. New split UID assignment is a non-atomic second write; errors surface without internally replaying the committed first edit. Older copied-UID groups retain bounded read compatibility only: after generator removal a sole survivor can fall back to its stored series UID, or multiple survivors can be ambiguous. No bulk migration is performed. Mixed DATE/date-time and equal native start/due values remain a separate strict RFC5545 fidelity gap; no timestamp/precision guessing is included.
