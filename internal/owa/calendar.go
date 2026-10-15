@@ -534,7 +534,9 @@ func taskFromItem(item map[string]any, listID string) bridge.Task {
 			t.Reminder = &v
 		}
 	}
-	t.Recur, t.RecurStart, t.RecurTimeZone, t.RecurUnsupported = taskRecurrenceFromOWA(item)
+	if dead, known := taskDeadOccurrence(item); !known || !dead {
+		t.Recur, t.RecurStart, t.RecurTimeZone, t.RecurUnsupported = taskRecurrenceFromOWA(item)
+	}
 	return t
 }
 func firstNonEmpty(a, b string) string {
@@ -638,10 +640,12 @@ func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task,
 	// GetItem property URIs differ from the translated UpdateItem field names.
 	for _, field := range []string{
 		"item:Subject", "item:Body", "item:TextBody", "item:Importance", "item:Categories", "item:Attachments", "item:HasAttachments", "task:DueDate", "task:StartDate", "task:CompleteDate",
-		"task:PercentComplete", "task:Status", "task:IsComplete", "item:ReminderDueBy", "item:ReminderIsSet", "task:Recurrence",
+		"task:PercentComplete", "task:Status", "task:IsComplete", "task:IsRecurring", "item:ReminderDueBy", "item:ReminderIsSet", "task:Recurrence",
 	} {
 		properties = append(properties, propURI(field))
 	}
+	// Recurrence data can remain on detached task occurrences (MS-OXOTASK 3.1.4.6.3).
+	properties = append(properties, map[string]any{"__type": "ExtendedPropertyUri:#Exchange", "DistinguishedPropertySetId": "Task", "PropertyId": 0x8109, "PropertyType": "Boolean"})
 	for _, name := range []string{taskUIDPropertyName, taskStartDateOnlyPropertyName, taskDueDateOnlyPropertyName} {
 		field := taskNamedField(name)
 		field["__type"] = "ExtendedPropertyUri:#Exchange"
@@ -649,6 +653,7 @@ func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task,
 	}
 	shape := map[string]any{"__type": "ItemResponseShape:#Exchange", "BaseShape": "Default", "AdditionalProperties": properties}
 	var out []bridge.Task
+	var occurrences []taskOccurrenceState
 	seen := map[string]bool{}
 	for offset := 0; ; {
 		req := findItemReq(listID, offset, 1000, nil)
@@ -694,6 +699,9 @@ func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task,
 				}
 				delete(pending, task.ID)
 				out = append(out, task)
+				dead, known := taskDeadOccurrence(item)
+				uid, _ := taskNamedString(item, taskUIDPropertyName)
+				occurrences = append(occurrences, taskOccurrenceState{dead: dead, known: known, recurring: boolean(item, "IsRecurring"), storedUID: uid != ""})
 			}
 			if len(pending) != 0 {
 				return nil, fmt.Errorf("owa: ListTasks: missing task items in readback")
@@ -710,6 +718,9 @@ func (p *provider) ListTasks(ctx context.Context, listID string) ([]bridge.Task,
 			break
 		}
 		offset = next
+	}
+	if err := projectTaskOccurrenceUIDs(out, occurrences); err != nil {
+		return nil, err
 	}
 	p.log.Debug().Str("channel", "owa").Str("op", "list_tasks").Str("account", p.email).
 		Int("discovered", len(seen)).Int("returned", len(out)).Msg("owa task listing")
@@ -833,8 +844,23 @@ func (p *provider) UpdateTask(ctx context.Context, t bridge.Task) error {
 		"ConflictResolution": "AlwaysOverwrite", "MessageDisposition": "SaveOnly",
 		"SendCalendarInvitationsOrCancellations": "SendToNone", "SuppressReadReceipts": true,
 	})
-	_, err := p.call(ctx, "UpdateItem", req)
-	return err
+	res, err := p.call(ctx, "UpdateItem", req)
+	if err != nil {
+		return err
+	}
+	newID := str(firstItem(res), "ItemId", "Id")
+	if newID == "" || newID == t.ID {
+		return nil
+	}
+	// A changed ID proves a detached native occurrence; assign its UID without replaying task edits.
+	updates = nil
+	setNamedString(taskUIDPropertyName, newID)
+	asMap(req["Body"])["ItemChanges"] = []any{map[string]any{"__type": "ItemChange:#Exchange", "ItemId": itemID(newID), "Updates": updates}}
+	if _, err := p.call(ctx, "UpdateItem", req); err != nil {
+		// The native edit already succeeded; auth recovery must not replay it.
+		return bridge.Wrap(bridge.KindOther, "owa: UpdateTask: detached task UID repair after native split", err)
+	}
+	return nil
 }
 
 func (p *provider) DeleteTask(ctx context.Context, listID, id string) error {

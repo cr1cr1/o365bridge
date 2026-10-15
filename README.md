@@ -284,7 +284,9 @@ invalid nonempty dates fail explicitly instead of disappearing. No guessed
 UTC-midnight/noon or tenant-timezone rewrite is applied. Graph full task updates
 clear omitted nullable dates/notes; partial provider updates leave unsupplied
 fields alone. Graph task updates and DATE-metadata extension updates are separate,
-non-atomic requests; failure is returned and retry uses the same task.
+non-atomic requests; failure is returned and retry uses the same task. Native tasks
+with mixed DATE/date-time start/due precision or equal start/due values remain a
+strict iCalendar fidelity limit; dates are not shifted or truncated to disguise it.
 
 Common scheduled repetition maps through native task-specific schemas: daily,
 selected weekdays/weekly intervals, month dates or supported ordinal weekdays,
@@ -294,6 +296,23 @@ weekday subsets, incompatible timezone ranges, and recurrence exceptions are
 not silently changed to a different schedule. Unsupported native repetition is
 preserved on ordinary edits. Native clamp/skip behavior for month-end/leap dates
 and actual task timezone display still need live acceptance.
+
+OWA can split a recurring task when its dates change or an occurrence is completed:
+Microsoft retains the continuing series and creates a separate occurrence. Those
+cloud rows are not automatically deleted or merged. Native occurrence flags, not
+copied recurrence/UID metadata or task titles, distinguish the continuing series
+from detached occurrences. The series keeps its client UID; detached siblings get
+native-ID-based UIDs and no active RRULE. A sole final occurrence retains its client
+UID. New native splits also assign the detached item its own bridge UID with a
+metadata-only follow-up write, so identity survives later series completion/deletion.
+That assignment is non-atomic: a failure is reported after the native edit may
+already have succeeded; synchronize before retrying. Legacy copied-UID groups are
+not bulk-migrated on read: after their generator ends or is deleted, survivors can
+fall back to their stored UID or fail as ambiguous. That historical projection is
+not a durable migration. Ambiguous groups fail explicitly instead of selecting by
+response order.
+After recurring-task PUTs, obtain a fresh ETag through GET before another conditional
+edit; the native service may have advanced the series.
 
 Existing native **file attachments** appear as authenticated bridge ATTACH links.
 GET/HEAD downloads use the bridge email/password, validate account/list/task/file

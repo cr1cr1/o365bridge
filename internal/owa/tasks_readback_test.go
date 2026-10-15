@@ -45,20 +45,26 @@ func TestOWATasksHydrateSparseDiscovery(t *testing.T) {
 	}
 	props := arr(f.last("GetItem").Body, "Body", "ItemShape", "AdditionalProperties")
 	fields := map[string]bool{}
-	var foundUID bool
+	var foundUID, foundDeadOccurrence bool
 	for _, prop := range props {
 		fields[str(prop, "FieldURI")] = true
+		if str(prop, "__type") == "ExtendedPropertyUri:#Exchange" && str(prop, "DistinguishedPropertySetId") == "Task" && num(prop, "PropertyId") == 0x8109 && str(prop, "PropertyType") == "Boolean" {
+			foundDeadOccurrence = true
+		}
 		if str(prop, "__type") == "ExtendedPropertyUri:#Exchange" && str(prop, "DistinguishedPropertySetId") == "PublicStrings" && str(prop, "PropertyName") == "O365BridgeTaskUID" && str(prop, "PropertyType") == "String" {
 			foundUID = true
 		}
 	}
-	for _, field := range []string{"item:Subject", "item:Body", "item:TextBody", "item:Importance", "item:Categories", "item:Attachments", "item:HasAttachments", "task:DueDate", "task:StartDate", "task:CompleteDate", "task:PercentComplete", "task:Status", "item:ReminderDueBy", "item:ReminderIsSet", "task:Recurrence"} {
+	for _, field := range []string{"item:Subject", "item:Body", "item:TextBody", "item:Importance", "item:Categories", "item:Attachments", "item:HasAttachments", "task:DueDate", "task:StartDate", "task:CompleteDate", "task:PercentComplete", "task:Status", "task:IsRecurring", "item:ReminderDueBy", "item:ReminderIsSet", "task:Recurrence"} {
 		if !fields[field] {
 			t.Errorf("missing task property %s", field)
 		}
 	}
 	if !foundUID {
 		t.Error("task readback did not request named String UID property")
+	}
+	if !foundDeadOccurrence {
+		t.Error("task readback did not request native Boolean TaskDeadOccurrence property")
 	}
 }
 

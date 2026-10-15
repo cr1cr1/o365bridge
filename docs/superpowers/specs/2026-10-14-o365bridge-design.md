@@ -537,6 +537,31 @@ File metadata is listed without fetching bytes; account/list/task/file ownership
 is revalidated for download, including registry recovery. Downloads are bounded
 to 32 MiB, attachment-disposition, nosniff and private/no-store. Upload/delete,
 embedded items/reference links and VTODO alarm editing are not implemented.
+OWA scheduled task date changes/completion can detach an occurrence while the
+original native ID advances. Both may retain copied client UID and recurrence
+data; `task:IsRecurring` and PSETID_Task Boolean `PidLidTaskDeadOccurrence` (0x8109)
+are read explicitly. Dead occurrences do not expose an active RRULE. A duplicate
+UID group is resolved only with one proven continuing generator and explicitly
+dead siblings: the generator retains its client UID, siblings use native-ID UIDs.
+A sole final occurrence retains its client UID. Unknown/multiple owners and
+projected UID collisions fail closed, without deleting, title-matching or mutating
+cloud metadata during reads. For future splits, a changed native UpdateItem response
+ID triggers one metadata-only UID assignment to that detached ID, preserving the
+continuing task's UID. The two writes are non-atomic; post-write failures must not
+cause registry authentication recovery to replay the original date-changing edit.
+Existing copied-UID groups retain the bounded read projection, not a bulk migration.
+After their generator ends/deletes, multiple survivors can be ambiguous, while a
+sole survivor retains its stored UID (and can therefore fall back to the old series
+UID). New write-assigned detached UIDs avoid this historical identity instability.
+Recurring-task PUTs do not manufacture an ETag from pre-normalization input;
+canonical GET owns the next validator. Native one-off rows in Outlook remain
+legitimate separate objects, not automatic cleanup targets.
+
+Mixed DATE/date-time task start/due precision and equal native start/due values
+remain strict RFC 5545 representation gaps. No lossless universal coercion follows
+from midnight/equality; the identity repair does not truncate, promote or shift
+those native values, nor claim the client's observed due-date change is explained.
+
 Graph task/date-extension updates are separate, non-atomic requests with errors
 propagated and retry of the same task. No new task-content store or auth channel.
 See the [task-detail design/evidence carrier](<../../aegis/work/2026-10-15-task-details/10-intent.md>)

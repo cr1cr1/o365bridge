@@ -804,7 +804,10 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 				}
 				tk.Attachments = ex.Attachments
 				tk = taskWithAttachmentURIs(r, email, collID, tk)
-				w.Header().Set("ETag", etag(tk.ID, generateTaskICalendar(tk)))
+				// Native recurring-task edits can advance the series or detach an occurrence.
+				if ex.Recur == "" && !ex.RecurUnsupported && tk.Recur == "" && !tk.RecurUnsupported {
+					w.Header().Set("ETag", etag(tk.ID, generateTaskICalendar(tk)))
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -829,7 +832,9 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 		if created.ID != "" {
 			tk.ID = created.ID
 		}
-		w.Header().Set("ETag", etag(tk.ID, generateTaskICalendar(tk)))
+		if tk.Recur == "" && !tk.RecurUnsupported {
+			w.Header().Set("ETag", etag(tk.ID, generateTaskICalendar(tk)))
+		}
 		w.WriteHeader(http.StatusCreated)
 		return
 	}
