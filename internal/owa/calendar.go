@@ -815,9 +815,9 @@ func (p *provider) UpdateTask(ctx context.Context, t bridge.Task) error {
 	}
 	if t.RecurSet {
 		if recurrence != nil {
-			updates = setField(updates, "Task", "Recurrence", taskItem("Recurrence", recurrence))
+			updates = setField(updates, "Task", "TaskRecurrence", taskItem("Recurrence", recurrence))
 		} else {
-			updates = append(updates, map[string]any{"__type": "DeleteItemField:#Exchange", "Path": propURI("Recurrence")})
+			updates = append(updates, map[string]any{"__type": "DeleteItemField:#Exchange", "Path": propURI("TaskRecurrence")})
 		}
 	}
 	setNamedString := func(name, value string) {

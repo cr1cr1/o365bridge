@@ -85,7 +85,7 @@ func TestCalDAVRecurringTaskDateEditKeepsSeriesAndDetachedOccurrenceAddressable(
 					body = str(change, "Item", "Body", "Value")
 				case "TaskDueDate":
 					due = str(change, "Item", "DueDate")
-				case "TaskPercentComplete", "TaskCompleteDate", "Recurrence":
+				case "TaskPercentComplete", "TaskCompleteDate", "Recurrence", "TaskRecurrence":
 					t.Errorf("date/note edit rewrote unrelated native state: %+v", change)
 				}
 			}

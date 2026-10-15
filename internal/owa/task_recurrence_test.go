@@ -120,7 +120,7 @@ func TestOWATaskNativeRecurrenceRangesAndGroupedDays(t *testing.T) {
 			}
 			var written any
 			for _, update := range arr(arr(f.last("UpdateItem").Body, "Body", "ItemChanges")[0], "Updates") {
-				if str(update, "Path", "FieldURI") == "Recurrence" {
+				if str(update, "Path", "FieldURI") == "TaskRecurrence" {
 					written = dig(update, "Item", "Recurrence", "RecurrenceRange")
 				}
 			}
@@ -145,7 +145,7 @@ func TestOWATaskUnsupportedNativeRecurrenceIsPreserved(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, update := range arr(arr(f.last("UpdateItem").Body, "Body", "ItemChanges")[0], "Updates") {
-				if str(update, "Path", "FieldURI") == "Recurrence" {
+				if field := str(update, "Path", "FieldURI"); field == "TaskRecurrence" || field == "Recurrence" {
 					t.Fatalf("unrelated edit touched unsupported recurrence: %+v", update)
 				}
 			}
@@ -174,7 +174,7 @@ func TestOWATaskRecurrenceMixedOffsetsArePreserved(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, update := range arr(arr(f.last("UpdateItem").Body, "Body", "ItemChanges")[0], "Updates") {
-			if str(update, "Path", "FieldURI") == "Recurrence" {
+			if field := str(update, "Path", "FieldURI"); field == "TaskRecurrence" || field == "Recurrence" {
 				t.Fatal("ordinary edit rewrote native endpoint offsets")
 			}
 		}
@@ -233,7 +233,7 @@ func TestOWATaskTimedUntilChecksAllSuppliedTaskTimes(t *testing.T) {
 		t.Fatalf("unrelated edit validated an untouched recurrence: %v", err)
 	}
 	for _, update := range arr(arr(f.last("UpdateItem").Body, "Body", "ItemChanges")[0], "Updates") {
-		if str(update, "Path", "FieldURI") == "Recurrence" {
+		if field := str(update, "Path", "FieldURI"); field == "TaskRecurrence" || field == "Recurrence" {
 			t.Fatal("unrelated edit touched native recurrence")
 		}
 	}
@@ -251,7 +251,7 @@ func TestOWATaskRecurrenceRangeAnchorSurvivesUndatedRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, update := range arr(arr(f.last("UpdateItem").Body, "Body", "ItemChanges")[0], "Updates") {
-		if str(update, "Path", "FieldURI") == "Recurrence" {
+		if str(update, "Path", "FieldURI") == "TaskRecurrence" {
 			if got := str(update, "Item", "Recurrence", "RecurrenceRange", "StartDate"); got != "2026-10-15+03:00" {
 				t.Fatalf("native range anchor = %q", got)
 			}

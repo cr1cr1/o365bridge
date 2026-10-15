@@ -41,7 +41,7 @@ func TestOWATaskRepeatUpdateAndClear(t *testing.T) {
 			}
 			var mutation any
 			for _, change := range arr(arr(f.last("UpdateItem").Body, "Body", "ItemChanges")[0], "Updates") {
-				if str(change, "Path", "FieldURI") == "Recurrence" {
+				if str(change, "Path", "FieldURI") == "TaskRecurrence" {
 					mutation = change
 				}
 			}
@@ -185,7 +185,7 @@ func TestOWATaskPartialUpdateDoesNotClearOmittedDates(t *testing.T) {
 		if str(update, "__type") == "DeleteItemField:#Exchange" {
 			t.Fatalf("partial update deleted omitted field: %+v", update)
 		}
-		if field := str(update, "Path", "FieldURI"); field == "TaskPercentComplete" || field == "Body" || field == "ReminderIsSet" || field == "Recurrence" {
+		if field := str(update, "Path", "FieldURI"); field == "TaskPercentComplete" || field == "Body" || field == "ReminderIsSet" || field == "Recurrence" || field == "TaskRecurrence" {
 			t.Fatalf("partial update reset omitted field: %+v", update)
 		}
 	}

@@ -65,7 +65,9 @@ func TestNativeTaskDetailsAndFileThroughCalDAV(t *testing.T) {
 					} else {
 						first["DueDate"] = item["DueDate"]
 					}
-				case "Recurrence":
+				case "Recurrence", "calendar:Recurrence":
+					t.Error("native task update targeted calendar recurrence")
+				case "TaskRecurrence":
 					if str(change, "__type") == "DeleteItemField:#Exchange" {
 						delete(first, "Recurrence")
 					} else {
