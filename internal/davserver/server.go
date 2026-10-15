@@ -52,8 +52,9 @@ type xMultistatus struct {
 	Responses []xResponse `xml:"D:response"`
 }
 type xResponse struct {
-	Href     string    `xml:"D:href"`
-	Propstat xPropstat `xml:"D:propstat"`
+	Href     string     `xml:"D:href"`
+	Propstat *xPropstat `xml:"D:propstat,omitempty"`
+	Status   string     `xml:"D:status,omitempty"`
 }
 type xPropstat struct {
 	Prop   xProp  `xml:"D:prop"`
@@ -90,7 +91,7 @@ type xProp struct {
 func empty() *struct{} { return &struct{}{} }
 
 func resp(href string, p xProp) xResponse {
-	return xResponse{Href: href, Propstat: xPropstat{Prop: p, Status: "HTTP/1.1 200 OK"}}
+	return xResponse{Href: href, Propstat: &xPropstat{Prop: p, Status: "HTTP/1.1 200 OK"}}
 }
 
 func (h *handler) writeMultistatus(w http.ResponseWriter, resps []xResponse) {
@@ -250,6 +251,50 @@ func parseReport(body []byte) (xReport, error) {
 	}
 	err := xml.Unmarshal(body, &rep)
 	return rep, err
+}
+
+// calendarUIDFromHref decodes the resource tail once without losing opaque slashes.
+func calendarUIDFromHref(href, email, collID string) (string, bool) {
+	href = strings.TrimSpace(href)
+	if strings.ContainsAny(href, "?#") {
+		return "", false
+	}
+	u, err := url.Parse(href)
+	if err != nil || u.Opaque != "" || u.User != nil {
+		return "", false
+	}
+	if u.Scheme != "" {
+		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return "", false
+		}
+	} else if u.Host != "" {
+		return "", false
+	}
+	path := u.EscapedPath()
+	if strings.HasPrefix(path, "/") {
+		parts := strings.SplitN(path[1:], "/", 4)
+		if len(parts) != 4 {
+			return "", false
+		}
+		for i, want := range []string{"caldav", email, collID} {
+			part, err := url.PathUnescape(parts[i])
+			if i == 1 {
+				part = bridge.NormalizeEmail(part)
+			}
+			if err != nil || part != want {
+				return "", false
+			}
+		}
+		path = parts[3]
+	} else if u.Scheme != "" || strings.Contains(path, "/") {
+		return "", false
+	}
+	value, err := url.PathUnescape(path)
+	if err != nil || !strings.HasSuffix(value, ".ics") {
+		return "", false
+	}
+	value = strings.TrimSuffix(value, ".ics")
+	return value, value != ""
 }
 
 func flattenFilter(cf *xCompFilter, comps *[]string, tr **xTimeRange) {
@@ -449,11 +494,12 @@ func (h *handler) handleCalDAV(w http.ResponseWriter, r *http.Request, email str
 		h.handleTaskAttachment(w, r, email, collID, segs)
 		return
 	}
-	if len(segs) != 4 {
+	uid, ok := calendarUIDFromHref(r.URL.EscapedPath(), email, collID)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	h.handleCalObject(w, r, email, collID, segs[3])
+	h.handleCalObject(w, r, email, collID, uid)
 }
 
 func (h *handler) collProp(email string, c collection) xResponse {
@@ -596,14 +642,36 @@ func (h *handler) reportCalendar(w http.ResponseWriter, r *http.Request, email s
 		return
 	}
 	fetched := len(objs)
+	var missing []xResponse
 	if root == "calendar-multiget" {
-		want := map[string]bool{}
+		index := map[string][]int{}
+		for i, o := range objs {
+			index[o.uid] = append(index[o.uid], i)
+			if o.id != o.uid {
+				index[o.id] = append(index[o.id], i)
+			}
+		}
+		selected, requested := map[int]bool{}, map[string]bool{}
 		for _, hf := range rep.Hrefs {
-			want[uidFromHref(hf)] = true
+			if requested[hf] {
+				continue
+			}
+			requested[hf] = true
+			uid, ok := calendarUIDFromHref(hf, email, coll.ID)
+			matches := index[uid]
+			if !ok || len(matches) == 0 {
+				missing = append(missing, xResponse{Href: hf, Status: "HTTP/1.1 404 Not Found"})
+				continue
+			}
+			if len(matches) != 1 {
+				http.Error(w, "ambiguous calendar href", http.StatusConflict)
+				return
+			}
+			selected[matches[0]] = true
 		}
 		var filtered []calObj
-		for _, o := range objs {
-			if want[o.uid] || want[o.id] {
+		for i, o := range objs {
+			if selected[i] {
 				filtered = append(filtered, o)
 			}
 		}
@@ -616,6 +684,7 @@ func (h *handler) reportCalendar(w http.ResponseWriter, r *http.Request, email s
 			Getetag: etag(o.id, o.data), CalData: string(o.data), Getct: "text/calendar; charset=utf-8",
 		}))
 	}
+	resps = append(resps, missing...)
 	if event := h.logger.Debug(); event.Enabled() {
 		ids, uids := map[string]bool{}, map[string]bool{}
 		for _, object := range objs {
@@ -623,7 +692,7 @@ func (h *handler) reportCalendar(w http.ResponseWriter, r *http.Request, email s
 		}
 		event.Str("protocol", "dav").Str("op", "calendar_report").Str("account", email).
 			Str("report", root).Int("fetched", fetched).Int("requested_hrefs", len(rep.Hrefs)).
-			Int("returned", len(objs)).Int("unique_ids", len(ids)).Int("unique_uids", len(uids)).
+			Int("returned", len(objs)).Int("missing_hrefs", len(missing)).Int("unique_ids", len(ids)).Int("unique_uids", len(uids)).
 			Int("duplicate_uids", len(objs)-len(uids)).Msg("dav calendar report")
 	}
 	h.writeMultistatus(w, resps)
@@ -671,8 +740,7 @@ func contains(s []string, v string) bool {
 	return false
 }
 
-func (h *handler) handleCalObject(w http.ResponseWriter, r *http.Request, email, collID, file string) {
-	uid := uidFromHref(file)
+func (h *handler) handleCalObject(w http.ResponseWriter, r *http.Request, email, collID, uid string) {
 	switch r.Method {
 	case "GET", "HEAD", "PROPFIND":
 		coll, ok, err := h.getColl(r, email, collID)
@@ -687,6 +755,16 @@ func (h *handler) handleCalObject(w http.ResponseWriter, r *http.Request, email,
 		objs, err := h.calObjects(r, email, coll, wideFrom, wideTo, true)
 		if err != nil {
 			h.upstreamErr(w, email, err)
+			return
+		}
+		matches := 0
+		for _, o := range objs {
+			if o.uid == uid || o.id == uid {
+				matches++
+			}
+		}
+		if matches > 1 {
+			http.Error(w, "ambiguous calendar href", http.StatusConflict)
 			return
 		}
 		for _, o := range objs {
@@ -758,6 +836,16 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 		existing, err := h.fetchTasks(r, email, collID)
 		if err != nil {
 			h.upstreamErr(w, email, err)
+			return
+		}
+		matches := 0
+		for _, ex := range existing {
+			if ex.UID == tk.UID || ex.ID == tk.UID {
+				matches++
+			}
+		}
+		if matches > 1 {
+			http.Error(w, "ambiguous calendar href", http.StatusConflict)
 			return
 		}
 		for _, ex := range existing {
@@ -850,6 +938,16 @@ func (h *handler) putCalObject(w http.ResponseWriter, r *http.Request, email, co
 	existing, err := h.fetchEvents(r, email, collID, wideFrom, wideTo)
 	if err != nil {
 		h.upstreamErr(w, email, err)
+		return
+	}
+	matches := 0
+	for _, ex := range existing {
+		if ex.UID == ev.UID || ex.ID == ev.UID {
+			matches++
+		}
+	}
+	if matches > 1 {
+		http.Error(w, "ambiguous calendar href", http.StatusConflict)
 		return
 	}
 	ifMatch := r.Header.Values("If-Match")
@@ -979,6 +1077,16 @@ func (h *handler) deleteCalObject(w http.ResponseWriter, r *http.Request, email,
 			h.upstreamErr(w, email, err)
 			return
 		}
+		matches := 0
+		for _, tk := range tasks {
+			if tk.UID == uid || tk.ID == uid {
+				matches++
+			}
+		}
+		if matches > 1 {
+			http.Error(w, "ambiguous calendar href", http.StatusConflict)
+			return
+		}
 		for _, tk := range tasks {
 			if tk.UID == uid || tk.ID == uid {
 				if err := h.call(ctx, email, func(c context.Context, p bridge.Provider) error {
@@ -997,6 +1105,16 @@ func (h *handler) deleteCalObject(w http.ResponseWriter, r *http.Request, email,
 	evs, err := h.fetchEvents(r, email, collID, wideFrom, wideTo)
 	if err != nil {
 		h.upstreamErr(w, email, err)
+		return
+	}
+	matches := 0
+	for _, ev := range evs {
+		if ev.UID == uid || ev.ID == uid {
+			matches++
+		}
+	}
+	if matches > 1 {
+		http.Error(w, "ambiguous calendar href", http.StatusConflict)
 		return
 	}
 	for _, ev := range evs {

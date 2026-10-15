@@ -249,6 +249,13 @@ without bridge UID metadata use their unique cloud task ID in both the URL
 and iCalendar UID; task titles are never identity keys. VTODO/VEVENT writes to
 the wrong collection are rejected rather than converted.
 
+Opaque resource IDs can contain slashes, literal percent sequences and plus signs.
+CalDAV accepts both canonical URLs and Thunderbird's decoded/re-encoded resource
+paths for report and object operations, without repeatedly decoding the ID. Account
+and collection boundaries are checked separately; ambiguous decoded collection
+slashes are not guessed. Missing multiget resources return explicit per-resource
+errors after existing aliases have been matched, rather than an empty success.
+
 If tasks created in Thunderbird appear in Outlook on the web but not locally,
 restart the current bridge build and synchronize the remote Tasks collection.
 Older creations did not store Thunderbird's UID; their original UID cannot be

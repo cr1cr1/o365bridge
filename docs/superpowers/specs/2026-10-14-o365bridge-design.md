@@ -557,6 +557,21 @@ Recurring-task PUTs do not manufacture an ETag from pre-normalization input;
 canonical GET owns the next validator. Native one-off rows in Outlook remain
 legitimate separate objects, not automatic cleanup targets.
 
+Native task recurrence updates use the translated `TaskRecurrence` property path
+for SET and DELETE. Bare `Recurrence` resolves to calendar:Recurrence and is valid
+only for calendar-event updates; the task creation payload still uses its native
+`Recurrence` member and TaskRecurrenceType. Native error-shaped adapter tests keep
+this distinction separate from recurrence pattern conversion.
+
+CalDAV opaque resource identifiers are decoded once relative to the known account
+and collection, including Thunderbird's resource-slash decode/re-encode behavior.
+The account and collection path boundaries remain strict; fully decoded slashes
+inside those boundaries are not guessed as resource aliases. Canonical and
+client-normalized resource URLs must select the same object for reports and object
+operations, without title matching, repeated percent decoding or cross-collection
+basename fallback. Missing multiget resources receive explicit per-resource errors
+only after valid existing aliases have been resolved.
+
 Mixed DATE/date-time task start/due precision and equal native start/due values
 remain strict RFC 5545 representation gaps. No lossless universal coercion follows
 from midnight/equality; the identity repair does not truncate, promote or shift
