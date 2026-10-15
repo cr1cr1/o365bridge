@@ -1,18 +1,15 @@
 # o365bridge
 
-A personal, single-user Go daemon that bridges Outlook 365 accounts to
-standard open protocols, for tenants where IMAP/SMTP are disabled and
-Microsoft Graph is not consented.
-
-It runs on the same Linux desktop as your mail client. Downstream it
-speaks **IMAP** (1143), **SMTP** (1025), **CalDAV/CardDAV** (1080), and
-**JMAP** (18080) on loopback. Plaintext is the default; optional TLS
-provides HTTPS and per-endpoint implicit TLS or STARTTLS. Upstream it
-speaks **OWA** (the Outlook web app's
-internal API, which cannot be disabled without breaking webmail) and,
-when a tenant admin provides an app registration, **Microsoft Graph**.
-
-Design: [docs/superpowers/specs/2026-10-14-o365bridge-design.md](docs/superpowers/specs/2026-10-14-o365bridge-design.md)
+- Personal, single-user Go daemon for one Linux desktop.
+- For Outlook 365 tenants where IMAP/SMTP are disabled and Graph is not consented.
+- Client protocols, all on loopback:
+  - IMAP `1143`
+  - SMTP `1025`
+  - CalDAV/CardDAV `1080`
+  - JMAP `18080` (0 disables it)
+- Upstream: OWA by default; Microsoft Graph if a tenant admin supplies an app registration.
+- No local mail store. Requests are translated live.
+- Design: [main design](docs/superpowers/specs/2026-10-14-o365bridge-design.md)
 
 ## Quick start
 
@@ -21,421 +18,232 @@ go build -o o365bridge .
 OB_PASSWORD='choose-a-bridge-password' ./o365bridge serve
 ```
 
-Then add an account in your mail client (Thunderbird, Himalaya, …)
-exactly like a normal account:
+Client settings (Thunderbird, Himalaya, etc.):
 
-| Setting                | Value                                  |
-|------------------------|----------------------------------------|
-| Username               | your Outlook 365 email address         |
-| Password               | the bridge instance password (above)   |
-| IMAP server / port     | `127.0.0.1` / `1143`, plaintext by default |
-| SMTP server / port     | `127.0.0.1` / `1025`, plaintext by default |
-| CalDAV / CardDAV       | `http://127.0.0.1:1080/caldav/` and `/carddav/` |
-| JMAP                   | `http://127.0.0.1:18080/jmap/session` (discovery: `/.well-known/jmap`) |
+| Setting | Value |
+|---|---|
+| Username | Outlook 365 email address |
+| Password | Bridge password (`OB_PASSWORD` above) |
+| IMAP | `127.0.0.1:1143`, plaintext by default |
+| SMTP | `127.0.0.1:1025`, plaintext by default |
+| CalDAV / CardDAV | `http://127.0.0.1:1080/caldav/` and `/carddav/` |
+| JMAP | `http://127.0.0.1:18080/jmap/session`; discovery at `/.well-known/jmap` |
 
-The first time a client connects with an email the bridge has never
-seen, the bridge opens its own controlled Chromium window (via
-[go-rod](https://github.com/go-rod/rod)) where you sign in directly
-with Microsoft — MFA and conditional access included. That login is
-held until you finish it; your Microsoft password is never seen or
-stored by the bridge, and no account needs to be configured in
-advance. Sessions renew silently where possible; when Microsoft
-forces re-authentication (roughly every three months), the next
-client operation holds while the login window reappears.
+Login:
 
-Several accounts can be used at once: add each in your client the
-same way, with the account's email as the username and the same
-bridge password. Accounts are fully isolated from each other —
-separate logins, browser profiles, sessions, and state directories —
-so one account's re-login or failure never touches another. This is
-covered by automated two-account isolation tests (registry, IMAP,
-SMTP, CalDAV/CardDAV); trying it with two real Microsoft accounts
-remains a manual check, since the tests run against fakes.
+- First connection for a new email opens a controlled Chromium window ([go-rod](https://github.com/go-rod/rod)).
+- Sign in at Microsoft in that window. MFA and conditional access work there.
+- The bridge never sees or stores the Microsoft password.
+- No account setup is needed before the first connection.
+- Sessions renew silently where possible. If Microsoft asks again (about every three months), the next operation waits for that window.
+- Multiple accounts: add each with its own email, same bridge password.
+- Accounts stay separate: login, browser profile, session, state directory.
+- Tests cover two-account isolation (registry, IMAP, SMTP, CalDAV/CardDAV) against fakes. Two real Microsoft accounts are a manual check.
 
-## Flags (all also available as `OB_<FLAG>` environment variables)
+## Flags
+
+- All flags also work as `OB_<FLAG>` environment variables.
+- No config file.
 
 ```text
 o365bridge serve --help
 ```
 
-Help separates flags into Logging, Profiling, Listeners, Authentication,
-State and browser, and TLS groups. Grouping only changes help presentation;
-flag names, defaults, and environment variables remain unchanged.
+- `--interface` (default `127.0.0.1`)
+- `--imap-port` (1143), `--smtp-port` (1025), `--dav-port` (1080), `--jmap-port` (18080)
+- `--password` (required; prefer `OB_PASSWORD`)
+- `--graph-client-id` (empty: Graph off, OWA only)
+- `--state-dir`, `--browser-path`
+- `--help` groups flags for display only. Names, defaults and env vars do not change with grouping.
 
-Key flags: `--interface` (default `127.0.0.1`), `--imap-port` (1143),
-`--smtp-port` (1025), `--dav-port` (1080), `--jmap-port` (18080, 0
-disables), `--password` (required, prefer `OB_PASSWORD`),
-`--graph-client-id` (empty = Graph disabled, OWA only), `--state-dir`,
-`--browser-path`. There is no config file.
+## TLS (optional)
 
-## Optional TLS
-
-Enable encryption on the **existing ports**, using one PEM certificate/key
-pair for all downstream endpoints:
+- Encrypts the existing ports. One PEM cert/key pair for all endpoints.
+- Design: [downstream TLS design](<docs/superpowers/specs/2026-10-14-downstream-tls-design.md>)
 
 ```sh
 OB_PASSWORD='choose-a-bridge-password' ./o365bridge serve \
   --tls-enabled --tls-cert cert.pem --tls-key key.pem
 ```
 
-| Flag | Default | Meaning |
+| Flag | Default | Notes |
 |---|---|---|
-| `--tls-enabled` | false | HTTPS for DAV/JMAP and the chosen IMAP/SMTP TLS modes |
-| `--tls-cert` | unset | PEM certificate, optionally followed by its chain |
-| `--tls-key` | unset | Matching PEM private key |
-| `--tls-min-version` | 1.3 | Minimum version: `1.2` or `1.3` |
-| `--imap-tls-mode` | starttls | `starttls` or implicit `tls` |
-| `--smtp-tls-mode` | starttls | `starttls` or implicit `tls` |
+| `--tls-enabled` | false | HTTPS for DAV/JMAP; TLS mode below for IMAP/SMTP |
+| `--tls-cert` / `--tls-key` | unset | PEM cert (plus chain if any) / matching key |
+| `--tls-min-version` | 1.3 | `1.2` or `1.3` |
+| `--imap-tls-mode` / `--smtp-tls-mode` | starttls | `starttls` or `tls` (implicit) |
 
-The corresponding environment variables are `OB_TLS_ENABLED`, `OB_TLS_CERT`,
-`OB_TLS_KEY`, `OB_TLS_MIN_VERSION`, `OB_IMAP_TLS_MODE`, and `OB_SMTP_TLS_MODE`.
-Invalid TLS options or certificate/key files fail before any listener opens;
-there is no fallback to plaintext. The certificate is loaded once: restart
-when replacing it. Without `--tls-enabled`, the plaintext defaults above remain.
+- Env vars: `OB_TLS_ENABLED`, `OB_TLS_CERT`, `OB_TLS_KEY`, `OB_TLS_MIN_VERSION`, `OB_IMAP_TLS_MODE`, `OB_SMTP_TLS_MODE`.
+- Bad TLS options or files stop startup. No plaintext fallback.
+- Cert is loaded once. Restart to replace it.
+- URLs become `https://localhost:1080/caldav/`, `/carddav/`, and `https://localhost:18080/jmap/session` (discovery also at `https://localhost:18080/.well-known/jmap`).
+- Port does not move when you pick a TLS mode:
+  - STARTTLS: pick STARTTLS in Thunderbird, full email as username, Normal password. SMTP clients send EHLO again after the upgrade.
+  - Implicit TLS: set the matching `--*-tls-mode tls`, pick SSL/TLS in Thunderbird, keep the same port.
+- Client must trust the CA. Private CA: install its cert, or set Himalaya `tls.cert` (see [Himalaya example](<examples/himalaya/config.toml>)).
+- Hostname or IP you connect to must be in the cert SANs (`localhost`, `127.0.0.1`, etc.).
+- Do not turn off certificate verification.
 
-When enabled, use `https://localhost:1080/caldav/` or `/carddav/`, and
-`https://localhost:18080/jmap/session`. JMAP discovery also works directly at
-`https://localhost:18080/.well-known/jmap` and advertises HTTPS/WSS URLs.
-IMAP/SMTP each select **one** mode; the port does not change automatically:
+## Calendars
 
-- **STARTTLS (default):** in Thunderbird select **STARTTLS**, full email username,
-  and **Normal password**. Encryption is required before authentication. SMTP
-  clients must issue EHLO again after upgrading.
-- **Implicit TLS:** set `--imap-tls-mode tls` and/or `--smtp-tls-mode tls`, and
-  select **SSL/TLS** in Thunderbird, using the same configured port.
+Readback and identity:
 
-Clients must trust the certificate's issuing CA. For a private CA, install its
-certificate in the client's trust store or configure Himalaya's per-backend
-`tls.cert` option; see the [Himalaya example](<examples/himalaya/config.toml>).
-The hostname or IP used by the client must appear in the server certificate's
-subject alternative names (e.g. `localhost` and/or `127.0.0.1`). Do not disable
-certificate verification. The bridge remains a single-user service; TLS does
-not change account selection, passwords, or upstream Microsoft connections.
+- OWA finds IDs with `FindItem`, then loads full fields with batched `GetItem` before date filtering. Paging goes past 1,000 items.
+- Incomplete readback is an error. Events are not quietly hidden.
+- Event title is never an identity key. UID wins; cloud item ID is the fallback, in URL and iCalendar data.
+- IDs with `/`, `+`, `%` round-trip as one URL segment, decoded once.
+- Same-title events stay separate (tested through query, GET, absolute multiget).
 
-Design: [optional downstream TLS](<docs/superpowers/specs/2026-10-14-downstream-tls-design.md>).
+If an event is missing locally:
 
-## Calendar readback
+- After a `PUT` that returned `201`: restart the current build, refresh the client calendar.
+- Check Outlook on the web before recreating anything. Recreating can duplicate it.
+- Debug lines to capture from one refresh: `owa calendar listing`, `dav calendar report` (counts only, no contents or raw IDs), run with `--log-level debug`.
+- Known gap: different item IDs can share one nonempty UID and collide. Do not rewrite shared UIDs to item IDs; that can break recurrence and invitations.
 
-OWA calendar listing discovers item IDs with `FindItem`, then fetches complete
-calendar fields with batched `GetItem` requests before applying date filters.
-Discovery pages are followed beyond the first 1,000 items. Incomplete event
-readback returns an upstream error rather than silently hiding events.
+Recurrence:
 
-If a newly created event disappears after a successful CalDAV `PUT` (`201`),
-restart the bridge with the current build and refresh the client's calendar.
-The automated regression covers creation, GET, query/multiget, update, and
-deletion through the real OWA adapter against a fake HTTP server; real-tenant
-readback remains a manual check. Do not recreate events just because they are
-missing from a client's view—check Outlook on the web first to avoid duplicates.
+- Whole series only. Daily, weekly with weekday lists, and representable monthly/yearly rules (absolute or relative), with count, inclusive end date, or no end.
+- Anchor is the local calendar date. Timed `UNTIL` must be UTC DATE-TIME; all-day `UNTIL` must be DATE.
+- `TZID` wall times are kept across DST. Clients need IANA tz data. Custom `VTIMEZONE` is not supported.
+- Full CalDAV PUT can change or clear a supported rule. Ordinary edits keep native recurrence as is.
+- Partial provider updates touch recurrence only with `Event.RecurrenceSet=true`.
+- Unknown native rules are marked unsupported and kept. CalDAV will not replace or move those series.
+- Invitation replies go separately from recurrence changes.
+- Rejected, not dropped: `RDATE`, `EXDATE`, `RECURRENCE-ID`, multiple RRULEs, and rules the native API would clamp to another date.
+- Monthly days 29 to 31 and February 29 yearly rules: use Outlook. See native [monthly](<https://learn.microsoft.com/en-us/exchange/client-developer/web-service-reference/absolutemonthlyrecurrence>) and [yearly](<https://learn.microsoft.com/en-us/exchange/client-developer/web-service-reference/absoluteyearlyrecurrence>) patterns.
+- Series PUT returns no ETag (native normalization can change the data). GET again before the next conditional edit.
+- Stale `412`: refresh and retry. Do not force the overwrite.
+- Not done: occurrence/exception editing, shared-UID series identity, OWA expansion into later windows, full JMAP recurrence editing, saving the first CalDAV UID on new Graph events.
+- Tested against fake HTTP servers. Live Outlook/client checks are manual.
 
-Event titles are display text, never identity keys. CalDAV preserves Outlook's
-UID, falling back to the cloud item ID when it is missing, in both the resource
-URL and iCalendar data. Opaque identifiers containing `/`, `+`, or `%` round-trip
-without being split into URL segments or decoded twice. HTTP-backed regressions
-verify separate same-title events through query, GET, and absolute multiget.
+Categories:
 
-For a live calendar that still shows fewer events than expected, run with
-`--log-level debug` and capture the `owa calendar listing` and
-`dav calendar report` lines from one refresh. These show discovery, date-filter,
-returned-item, unique-ID/UID, and duplicate-UID counts, without event contents or
-raw item IDs. Distinct item IDs sharing a nonempty UID can still collide; recurring
-series/exception handling is incomplete. Shared UIDs must not be blindly replaced
-with item IDs, since that can break recurrence and invitation relationships.
+- Outlook category names sync to CalDAV `CATEGORIES` (OWA and Graph), including Unicode and commas/semicolons/backslashes.
+- Sync before editing, or stale data can drop categories. Stale `If-Match` PUT gets `412`; a missing event is not recreated.
+- Removing the last category in a full PUT clears it upstream. Updates that omit the field leave categories alone.
+- Names only. No Outlook category catalog or colors; Thunderbird colors are local.
+- Not covered: mail tags, contact categories, JMAP categories. Task categories work, see below.
+- Design: [event categories design](docs/superpowers/specs/2026-10-15-event-categories-design.md)
 
-## Recurring calendar events
+## Tasks
 
-Whole-series scheduled repetition is mapped to native OWA and Graph calendar
-patterns: daily, weekly (including weekday lists/week start), and representable
-absolute/relative monthly and yearly rules, with count, inclusive end date or
-no end. OWA supplies required default intervals/selectors; recurrence edits and
-clears now use the native field. Graph sends/reads its structured recurrence and
-lists native single events/series masters through `/events`, not expanded
-calendarView instances. Single-event overlap is filtered locally; masters are
-conservatively retained for client expansion (not exact occurrence-window matching).
-Creation requires a real native item ID; an unexpected success-shaped response
-without one is not reported as a successful calendar save.
+Basics:
 
-Rule anchors use the event's local calendar date. Timed `UNTIL` must be a UTC
-DATE-TIME; all-day `UNTIL` must be DATE. An inclusive native end date never adds
-an occurrence whose local start is after the requested cutoff. Repeating events
-retain IANA `TZID` wall times instead of becoming fixed-UTC schedules across DST.
-Windows timezone readback uses pinned CLDR global defaults, rather than choosing
-an arbitrary alphabetical alias (which could select a no-DST zone). Existing
-forward aliases remain approximate. Clients need IANA timezone data; custom
-`VTIMEZONE` definitions and generated timezone components are not supported.
+- Outlook tasks are task items, not appointments.
+- CalDAV collections: Tasks holds VTODO, calendars hold VEVENT. Wrong type for a collection is rejected.
+- Use the discovered Tasks collection in Thunderbird, not the calendar.
+- OWA main task list: `http://127.0.0.1:1080/caldav/<email>/tasks/` (use HTTPS with TLS on). OWA custom task lists are not discovered.
+- Graph finds To Do lists by opaque ID.
+- Design: [task readback design](docs/superpowers/specs/2026-10-14-task-readback-design.md)
 
-A complete CalDAV PUT can change or remove a supported rule; unrelated
-GET/edit/PUTs preserve native repetition without rewriting it. Supported anchor
-defaults, single ordinal weekday spellings and rule ordering compare equally.
-Partial provider updates change repetition only with `Event.RecurrenceSet=true`.
-Unknown/unrepresentable native rules carry an unsupported marker and survive
-ordinary edits; replacing or moving those series through CalDAV is refused.
-Invitation replies must be sent separately from recurrence changes, so an
-invalid series edit cannot partially send a response.
+Readback and identity:
 
-**Limits:** event rules that native APIs clamp to another date are not silently
-translated into skipping rules. Absolute monthly days 29–31 and yearly February
-29/invalid fixed dates are conservatively unsupported; use Outlook for these
-patterns. Explicit representable relative last-day patterns remain separate.
-The underlying distinction is documented for native
-[monthly](<https://learn.microsoft.com/en-us/exchange/client-developer/web-service-reference/absolutemonthlyrecurrence>)
-and [yearly](<https://learn.microsoft.com/en-us/exchange/client-developer/web-service-reference/absoluteyearlyrecurrence>)
-patterns.
-OWA native interval bounds are enforced. `RDATE`, `EXDATE`, `RECURRENCE-ID`, and
-multiple RRULEs are rejected rather than discarded. Occurrence/exception
-editing, shared-UID series identity, OWA master expansion into later query
-windows, and full JMAP recurrence editing remain incomplete. The limited JMAP
-adapter rejects selectors/exceptions it cannot translate instead of dropping
-them. Graph event resources still use cloud `iCalUId`: persistence of the initial
-CalDAV client UID on a newly created Graph event is not implemented, so same-path
-Graph create/GET identity parity is not claimed. The full create/GET/query/edit/
-clear integration regression uses OWA, which writes the client UID natively.
-Task recurrence codecs and mutation semantics are unchanged; shared canonical
-timezone readback applies to all providers.
+- OWA pages task IDs, then loads full fields in batches of at most 100. Partial readback is an error, not a short list.
+- Client UID is stored on the native task (OWA string property, Graph open extension), so GET/query/multiget/update/delete find the same task after restart.
+- No stored UID: cloud task ID is used in URL and iCalendar UID. Title is never a key.
+- IDs with slashes, literal `%`, or `+` work in canonical URLs and in Thunderbird's re-encoded paths, decoded once.
+- Missing multiget items get a per-resource error, not an empty success.
 
-Series PUT responses omit ETags because native recurrence normalization can
-change the representation; a fresh GET supplies the canonical ETag for the next
-conditional edit. Restart the current build and refresh the appointment calendar
-before editing; refresh/retry a stale `412` rather than forcing an overwrite.
-Real HTTP adapter regressions cover native schema acceptance, readback,
-unchanged-series preservation and explicit replace/clear. Actual Outlook cloud
-visibility, client expansion and live tenant acceptance still need an owner-run
-check; inspect Outlook before recreating missing items to avoid duplicates.
+If Thunderbird tasks show in Outlook on the web but not locally:
 
-## Event categories
+- Restart the current build. Sync the Tasks collection.
+- Old tasks may come back under cloud IDs. Their first Thunderbird UID was not stored and cannot be recovered.
+- Do not recreate them. They exist upstream; recreating can duplicate them.
+- Still missing: capture `owa task listing` and `dav calendar report` from one refresh at `--log-level debug` (counts only).
 
-Outlook event category **names** are synchronized through OWA and Graph to
-CalDAV `CATEGORIES`, including multiple categories, Unicode, and names containing
-commas, semicolons, or backslashes. Category changes affect the event's ETag, so
-clients can detect them on refresh. Restart the current bridge build and
-synchronize the remote calendar **before editing** to fetch existing cloud
-categories. Stale conditional VEVENT PUTs with `If-Match` are rejected with HTTP
-412 before any update/invitation response; a missing event with `If-Match` is not
-recreated. Refresh and retry rather than forcing an overwrite. This check is not
-an atomic upstream compare-and-swap; clients sending unconditional full PUTs
-still need fresh calendar data to avoid unintended category removal.
+Details, dates, reminders:
 
-Normal GET-edit-PUT event updates retain the categories in the downloaded object.
-Changing categories writes the native Outlook category array; removing the final
-category in a full CalDAV PUT clears it upstream. Programmatic/JMAP provider
-updates that do not supply this field leave cloud categories unchanged.
+- Categories and plain notes map both ways. HTML-only notes read as plain `DESCRIPTION`.
+- Unchanged notes keep their native HTML. `ALTREP` data (e.g. `DESCRIPTION;ALTREP="data:text/html,..."`) is not read into the body. Same rule for events and contacts.
+- Corrupted notes are not auto-fixed. Refresh, fix the text, save again.
+- Reminders and native progress/state survive unrelated edits. The bridge does not guess replacements.
+- Reminder support: one nonrepeating DISPLAY `VALARM`.
+  - GET writes it as an absolute UTC `TRIGGER`.
+  - Full VTODO PUT can set, change, or remove it. No alarm in the PUT means no reminder, so sync first.
+  - Unchanged reminder is not rewritten, which keeps native fractional seconds.
+  - Relative triggers need a zoned `DTSTART` or `DUE`. Days/weeks follow DST.
+  - Rejected: DATE or floating anchors, unknown zones, DST gaps/folds, `DTSTART`+`DURATION`, repeated/multiple alarms, AUDIO/EMAIL alarms.
+  - No custom alarm text, snooze, or dismissal state. Event alarms unchanged.
+- DATE-only start/due keeps DATE form across restarts (native metadata). Bad non-empty dates are errors.
+- No date is rewritten to UTC midnight/noon or a tenant zone.
+- Graph: full update clears omitted dates/notes; partial update leaves omitted fields alone. Task and date-metadata writes are separate calls, so a failure can need a retry on the same task.
+- Still limited: mixed DATE/date-time start and due, or equal start and due, on one native task.
 
-This maps names only, not Outlook's master-category catalog or color palette.
-Thunderbird category colors are local client settings. Mail tags, contact
-categories, and a JMAP category mapping remain outside scope; task category names
-are supported separately as described below. HTTP-backed
-regressions cover cloud readback through GET/query/multiget, category edits and
-clearing, and same-title sibling isolation; live client/tenant acceptance remains
-an owner-run check.
+Recurring tasks:
 
-## Tasks (Thunderbird / CalDAV)
+- Daily, weekly with weekdays, monthly by date or ordinal weekday, yearly by date. Count or end date.
+- Bad or unrepresentable rules are rejected before any write.
+- Unsupported native recurrence is kept on ordinary edits.
+- Not converted to a different schedule: completion-based regeneration, odd weekday subsets, out-of-range timezones, exceptions.
+- Month-end and leap dates, task timezone display: still need live checks.
+- Date changes or completing an occurrence can split a task in OWA: one series plus one detached occurrence. Both stay in Outlook. The bridge does not delete or merge cloud rows.
+- Series keeps the client UID. Detached copies get native-ID UIDs and no RRULE. A last remaining occurrence keeps the client UID.
+- New splits get the detached copy its own bridge UID in a second, metadata-only write. If that write fails after the edit went through, sync before retrying.
+- Old copied-UID groups are not migrated on read. If the series later ends, leftovers can fall back to the stored UID or come back ambiguous. Ambiguous groups are errors; nothing is picked by response order.
+- After a recurring PUT, GET a fresh ETag before the next conditional edit.
+- Stale `412` on any task PUT: refresh and retry. Full PUTs still need current data.
 
-Outlook tasks are native task items, not calendar appointments. The bridge
-exposes task lists as separate CalDAV collections supporting **VTODO**, while
-appointment calendars support **VEVENT**. In Thunderbird, use the discovered
-Tasks collection, not the appointment calendar, and synchronize that collection.
-OWA exposes the primary task folder at the stable URL
-`http://127.0.0.1:1080/caldav/<email>/tasks/`; custom OWA task-list discovery is
-not implemented. Graph discovers To Do lists using their opaque IDs. Use HTTPS
-when downstream TLS is enabled.
+Files:
 
-OWA discovers task IDs in pages and hydrates complete task fields in batches
-of at most 100. Sparse discovery rows are not used as complete tasks, and
-incomplete readback fails instead of returning a misleading partial list.
-Client task UIDs are saved with the native task: a named string property for
-OWA and an open extension for opt-in Graph. This allows GET, query/multiget,
-update, and delete to resolve the same task after a bridge restart. Tasks
-without bridge UID metadata use their unique cloud task ID in both the URL
-and iCalendar UID; task titles are never identity keys. VTODO/VEVENT writes to
-the wrong collection are rejected rather than converted.
-
-Opaque resource IDs can contain slashes, literal percent sequences and plus signs.
-CalDAV accepts both canonical URLs and Thunderbird's decoded/re-encoded resource
-paths for report and object operations, without repeatedly decoding the ID. Account
-and collection boundaries are checked separately; ambiguous decoded collection
-slashes are not guessed. Missing multiget resources return explicit per-resource
-errors after existing aliases have been matched, rather than an empty success.
-
-If tasks created in Thunderbird appear in Outlook on the web but not locally,
-restart the current bridge build and synchronize the remote Tasks collection.
-Older creations did not store Thunderbird's UID; their original UID cannot be
-recovered reliably and they are fetched under their cloud IDs. **Do not recreate
-them blindly**, since they already exist upstream and retries can add duplicates.
-If they are still missing, run with `--log-level debug` and capture the
-`owa task listing` (OWA accounts) and `dav calendar report` lines from the same
-refresh. The listing logs contain counts, not task titles, bodies, raw IDs, or
-credentials.
-
-HTTP-backed tests cover native task creation, full readback, handler/provider
-reconstruction, query/multiget, update, completion/reopening, deletion, and
-legacy cloud-ID fallback. These are not a live Thunderbird/Microsoft acceptance
-check. Advanced recurring-task exceptions and complete reminder/progress
-fidelity remain limited.
-
-### Task details and files
-
-Task category names and plain notes now map end to end. Native HTML-only notes
-are presented as plain DESCRIPTION text; unchanged notes retain their original
-rich formatting upstream. Quoted iCalendar parameters such as Thunderbird's
-`DESCRIPTION;ALTREP="data:text/html,..."` are kept separate from the plain notes;
-ALTREP content is not fetched or imported into the upstream body. The same
-quoted-parameter handling applies to event descriptions and contact fields.
-Existing reminders and native progress/state are preserved on unrelated edits
-rather than reset to a guessed value. Already-corrupted notes are not automatically
-rewritten; refresh, correct the description, and save it again after upgrading.
-
-Task reminders support **one nonrepeating DISPLAY VALARM**. GET emits its native
-instant as an absolute UTC trigger; a fresh full VTODO PUT can set, change or remove
-it. Omitting the alarm clears the reminder, so synchronize before editing cached
-tasks. An unchanged reminder does not rewrite its native fields, preserving native
-fractional precision even though standard alarm text has whole-second precision.
-Relative START/END triggers require an explicitly zoned date-time DTSTART/DUE;
-calendar days/weeks respect DST rather than becoming fixed 24-hour intervals.
-DATE-only/floating/unknown-zone anchors, ambiguous/nonexistent local times,
-DTSTART+DURATION fallback, repeated or multiple alarms and AUDIO/EMAIL actions
-are rejected instead of silently dropped or assigned a guessed timezone. Custom
-alarm-message and snooze/dismissal fidelity are not represented by the native
-single-instant reminder field; event alarm behavior is unchanged.
-
-Thunderbird DATE-only start/due values retain DATE precision through restart,
-using native task metadata. Existing ISO date/time values remain supported;
-invalid nonempty dates fail explicitly instead of disappearing. No guessed
-UTC-midnight/noon or tenant-timezone rewrite is applied. Graph full task updates
-clear omitted nullable dates/notes; partial provider updates leave unsupplied
-fields alone. Graph task updates and DATE-metadata extension updates are separate,
-non-atomic requests; failure is returned and retry uses the same task. Native tasks
-with mixed DATE/date-time start/due precision or equal start/due values remain a
-strict iCalendar fidelity limit; dates are not shifted or truncated to disguise it.
-
-Common scheduled repetition maps through native task-specific schemas: daily,
-selected weekdays/weekly intervals, month dates or supported ordinal weekdays,
-yearly dates, and count/end-date ranges. Invalid or unrepresentable rules are
-rejected before writing. Completion-relative regeneration, arbitrary relative
-weekday subsets, incompatible timezone ranges, and recurrence exceptions are
-not silently changed to a different schedule. Unsupported native repetition is
-preserved on ordinary edits. Native clamp/skip behavior for month-end/leap dates
-and actual task timezone display still need live acceptance.
-
-OWA can split a recurring task when its dates change or an occurrence is completed:
-Microsoft retains the continuing series and creates a separate occurrence. Those
-cloud rows are not automatically deleted or merged. Native occurrence flags, not
-copied recurrence/UID metadata or task titles, distinguish the continuing series
-from detached occurrences. The series keeps its client UID; detached siblings get
-native-ID-based UIDs and no active RRULE. A sole final occurrence retains its client
-UID. New native splits also assign the detached item its own bridge UID with a
-metadata-only follow-up write, so identity survives later series completion/deletion.
-That assignment is non-atomic: a failure is reported after the native edit may
-already have succeeded; synchronize before retrying. Legacy copied-UID groups are
-not bulk-migrated on read: after their generator ends or is deleted, survivors can
-fall back to their stored UID or fail as ambiguous. That historical projection is
-not a durable migration. Ambiguous groups fail explicitly instead of selecting by
-response order.
-After recurring-task PUTs, obtain a fresh ETag through GET before another conditional
-edit; the native service may have advanced the series.
-
-Existing native **file attachments** appear as authenticated bridge ATTACH links.
-GET/HEAD downloads use the bridge email/password, validate account/list/task/file
-ownership, and are bounded to 32 MiB per file; content is never cached locally or
-fetched from caller-supplied URLs. Files are served as downloads with safe MIME
-and filename headers. A client opening the link may prompt separately for bridge
-authentication. Embedded items, cloud reference/source links, and native file
-**upload/delete synchronization are not implemented**. New/changed attachment
-references are rejected rather than reported as uploaded; clients omitting
-attachment properties preserve existing native files.
-
-Restart the rebuilt bridge and **synchronize the remote Tasks collection before
-editing cached tasks**. Stale conditional task PUTs return 412 before updates;
-refresh and retry. Unconditional full PUTs still require fresh data. If a due
-date/note is still absent, provide the sanitized native field value and emitted
-VTODO field from the same refresh; basic support exists, so the live cause cannot
-be inferred from the symptom alone.
+- Existing native attachments show as authenticated `ATTACH` links.
+- Download (GET/HEAD) needs bridge login, checks account/list/task/file ownership, caps at 32 MiB per file.
+- Nothing is cached, and no client-supplied URL is fetched.
+- Not done: attachment upload or delete, embedded items, cloud reference links. New or changed attachment refs in a PUT are rejected; omitting them keeps the native files.
 
 ## JMAP
 
-The bridge also serves JMAP (mail, calendars, contacts) on its own
-port, with the same username (your email) and bridge password. A
-ready-made client config lives at
-[examples/himalaya/config.toml](examples/himalaya/config.toml). The
-surface is powered by a standalone server-side JMAP library that
-lives in this repository as a nested Go module — see
-[jmap/README.md](jmap/README.md); other projects can implement its
-backend contracts and reuse it.
-
-Two bridge-specific limits, stated plainly: uploaded blobs live in
-memory only (gone on restart, 32 MiB per account), and change
-tracking (`Email/changes`, push) is based on a small per-account
-journal of message IDs and hashes recording what the bridge has
-personally witnessed — asking about anything older returns the
-spec's `cannotCalculateChanges` and the client resyncs. Calendar and
-contact changes currently use that same fallback beyond the current
-state.
+- Mail, calendars, contacts on the JMAP port. Same email and bridge password.
+- Client config: [examples/himalaya/config.toml](examples/himalaya/config.toml)
+- Server code is a nested Go module others can reuse: [jmap/README.md](jmap/README.md); design: [JMAP library design](docs/superpowers/specs/2026-10-14-jmap-library-design.md)
+- Limits:
+  - Uploaded blobs live in memory only, 32 MiB per account. Gone on restart.
+  - `Email/changes` and push only cover what this bridge saw in its per-account journal. Older changes return `cannotCalculateChanges` and the client resyncs.
+  - Calendar/contact changes fall back the same way.
 
 ## Graph (optional)
 
-Graph is disabled by default because it needs an app registration
-created by a tenant admin. If your admin provides one, pass its
-client ID: `OB_GRAPH_CLIENT_ID=<client-id>`. Accounts then probe
-Graph first; any non-transient auth failure falls back to OWA
-automatically. Recommended registration: organizations audience,
-public client with PKCE, redirect
-`https://login.microsoftonline.com/common/oauth2/nativeclient`,
-delegated `offline_access`, `User.Read`, `Mail.ReadWrite`,
-`Calendars.ReadWrite`, `Contacts.ReadWrite`, `Tasks.ReadWrite`.
+- Off by default. Needs a tenant-admin app registration.
+- Turn on: `OB_GRAPH_CLIENT_ID=<client-id>`
+- Accounts try Graph first. Non-transient auth failure falls back to OWA.
+- Registration to ask your admin for:
+  - Organizations audience, public client with PKCE
+  - Redirect: `https://login.microsoftonline.com/common/oauth2/nativeclient`
+  - Delegated scopes: `offline_access`, `User.Read`, `Mail.ReadWrite`, `Calendars.ReadWrite`, `Contacts.ReadWrite`, `Tasks.ReadWrite`
 
 ## Logs
 
-The bridge logs with zerolog at human level by default: listener
-startup, per-account authentication (success at info, failure as a
-warning), operations such as IMAP append/copy/move, SMTP sends,
-and CalDAV/CardDAV puts/deletes, plus a warning with the upstream
-error whenever an operation fails for an account. Passwords, tokens and HTTP
-authentication/cookie headers are excluded. Personal content is not logged at
-info/debug; explicit trace enables upstream payload diagnostics (see below).
-Protocol summaries are available with `--log-level debug`. Individual `imap command`
-records are trace-only (`--log-level trace`): account (empty before login),
-remote connection address, command tag/name, authentication/TLS state, and
-selected mailbox context. Command arguments, passwords, SASL responses and
-APPEND literals are not included. Authentication and failure records keep
-their normal info/warning levels. Rejected DAV PUT/DELETE requests also log the
-account, operation and HTTP status at warning level, including failures before an
-upstream call (such as a stale `If-Match` returning 412). These failure summaries
-exclude resource paths, request bodies, headers and validators; 401 responses keep
-the existing authentication diagnostic rather than adding a duplicate operation log.
+- Default: human-readable, info level (listeners, logins, IMAP/SMTP/DAV operations, upstream failures).
+- Passwords, tokens, auth and cookie headers: never logged. No personal content at info/debug.
+- `--log-level debug`: protocol summaries (`owa calendar listing`, `dav calendar report`, task listing lines above).
+- `--log-level trace` adds:
+  - `imap command` lines with account, peer, tag/name, auth/TLS state, mailbox. No arguments, passwords, SASL data, or APPEND bodies.
+  - OWA/Graph request and response payloads, tagged by account, channel, operation.
+  - Browser login and OAuth token calls are not traced.
+- Rejected DAV PUT/DELETE logs account, operation, HTTP status at warning. No path, body, headers, or validators. `401` uses the normal auth log instead.
+- Trace payload limits:
+  - Only complete JSON, capped at 64 KiB in, 48 KiB out after redaction.
+  - Oversized, broken, or non-JSON bodies are skipped with a reason and byte count. No partial dumps.
+  - Base64 file bytes inside JSON are removed too. Base64 is not redaction.
+  - Known secrets and credential fields are redacted, but redaction is not anonymization.
+- Warning: trace logs contain mail, calendar, task and contact content.
+  - Keep them private. Capture one reproduction only.
+  - Redact before sharing. Go back to info/debug and delete the capture after.
 
-To diagnose native upstream requests, restart with `--log-level trace`
-(and optionally `--log-format json`). OWA and Graph provider HTTP calls emit
-separate request/response payload records with account, channel, operation and
-request correlation. Browser sign-in and OAuth token exchanges are not traced.
-Known session secrets and credential fields are redacted; HTTP auth/cookie
-headers are never included. Only complete JSON is rendered: capture is bounded
-to 64 KiB and sanitized JSON output to 48 KiB. Oversized, incomplete, malformed
-and opaque non-JSON MIME/base64/binary bodies are omitted with a reason and
-observed-byte count, never dumped as unsafe prefixes. Known native MIME/file
-byte fields inside JSON are also omitted: base64 is reversible, not redaction.
-Tracing does not change request bytes, response parsing, or existing attachment
-size limits.
+## State and reset
 
-**Trace logs contain personal mail, calendar, task and contact content.** Keep
-them private, capture only one reproduction, inspect/redact
-before sharing, then return to info/debug and remove the capture when no longer
-needed. Redaction is not an anonymization guarantee.
+- On disk: session cache only (found accounts, tokens/browser profiles, IMAP ID maps).
+- Location: `$XDG_STATE_HOME/o365bridge` by default, one owner-only directory per account.
+- Reset one account: stop the bridge, delete `accounts/<email>/` there, reconnect. That account logs in fresh.
 
-## State and resetting an account
+## Not supported
 
-The only thing on disk is an interim session cache (discovered
-accounts, tokens/browser profiles, IMAP ID mappings) in the state
-directory (`$XDG_STATE_HOME/o365bridge` by default), one
-owner-only directory per account. To reset one account, stop the
-bridge and delete `accounts/<email>/` inside it; the next client
-connection logs that account in fresh. There is no local mail store:
-the bridge translates requests live and keeps no copy of your mail.
-
-## Not in v1
-
-EWS and EAS, personal Microsoft accounts (outlook.com/hotmail.com),
-OneDrive/WebDAV files, headless/multi-user operation, management UI.
-JMAP and optional local TLS have since been added. Linux desktop is the supported target;
-other OSes are secondary.
+- EWS, EAS
+- Personal Microsoft accounts (outlook.com, hotmail.com)
+- OneDrive/WebDAV files
+- Headless or multi-user use
+- Management UI
+- Other OSes are secondary. Linux desktop is the target.
 
 ## Development
 
@@ -445,10 +253,6 @@ go test ./...
 go vet ./...
 ```
 
-(The `.gocache` env dance is only needed in sandboxes with a
-read-only Go cache; on a normal dev machine plain `go test ./...`
-works.)
-
-Tests run against fake Graph/OWA servers — no Microsoft account is
-needed. Live acceptance against a real tenant is a manual gate for
-the account owner.
+- The `.gocache` vars are only for sandboxes with a read-only Go cache. Elsewhere, plain `go test ./...` is fine.
+- Tests use fake Graph/OWA servers. No Microsoft account needed.
+- Real-tenant acceptance is a manual check by the account owner.
