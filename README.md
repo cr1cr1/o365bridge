@@ -384,7 +384,11 @@ records are trace-only (`--log-level trace`): account (empty before login),
 remote connection address, command tag/name, authentication/TLS state, and
 selected mailbox context. Command arguments, passwords, SASL responses and
 APPEND literals are not included. Authentication and failure records keep
-their normal info/warning levels.
+their normal info/warning levels. Rejected DAV PUT/DELETE requests also log the
+account, operation and HTTP status at warning level, including failures before an
+upstream call (such as a stale `If-Match` returning 412). These failure summaries
+exclude resource paths, request bodies, headers and validators; 401 responses keep
+the existing authentication diagnostic rather than adding a duplicate operation log.
 
 To diagnose native upstream requests, restart with `--log-level trace`
 (and optionally `--log-format json`). OWA and Graph provider HTTP calls emit

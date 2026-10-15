@@ -351,14 +351,21 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec := &statusRecorder{ResponseWriter: w, status: 200}
 	w = rec
 	defer func() {
-		// Mutating DAV operations are logged per account at info;
-		// reads stay at debug via the call sites that need them.
-		if (r.Method == "PUT" || r.Method == "DELETE") && rec.status < 400 {
-			user, _, _ := r.BasicAuth()
-			h.logger.Info().Str("protocol", "dav").Str("op", strings.ToLower(r.Method)).
-				Str("account", bridge.NormalizeEmail(user)).Str("path", r.URL.Path).
-				Int("status", rec.status).Msg("dav operation")
+		// Authentication failures already have their own diagnostic below.
+		if (r.Method != "PUT" && r.Method != "DELETE") || rec.status == http.StatusUnauthorized {
+			return
 		}
+		level, message := zerolog.InfoLevel, "dav operation"
+		if rec.status >= 400 {
+			level, message = zerolog.WarnLevel, "dav operation failed"
+		}
+		user, _, _ := r.BasicAuth()
+		event := h.logger.WithLevel(level).Str("protocol", "dav").Str("op", strings.ToLower(r.Method)).
+			Str("account", bridge.NormalizeEmail(user)).Int("status", rec.status)
+		if rec.status < 400 {
+			event.Str("path", r.URL.Path)
+		}
+		event.Msg(message)
 	}()
 	w.Header().Set("DAV", "1, 2, calendar-access, addressbook")
 	user, pass, ok := r.BasicAuth()
