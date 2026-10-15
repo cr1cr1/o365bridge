@@ -10,4 +10,4 @@ export MISE_PROJECT_ROOT
 
 [[ -d "${MISE_PROJECT_ROOT}/dist" ]] || mkdir -v "${MISE_PROJECT_ROOT}/dist"
 
-process-compose --port 8099 -f "${MISE_PROJECT_ROOT}/mise-tasks/process-compose.yaml"
+process-compose --port 18099 -f "${MISE_PROJECT_ROOT}/mise-tasks/process-compose.yaml"
