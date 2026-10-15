@@ -518,6 +518,15 @@ completion/reopening, and selective deletion. See the
 [task readback design](<2026-10-14-task-readback-design.md>) for evidence and limits.
 Live Thunderbird/tenant acceptance remains owner-run.
 
+The shared DAV content-line parser recognizes property/parameter separators only
+outside quoted parameter values. Thunderbird DESCRIPTION ALTREP data URLs remain
+metadata rather than becoming raw task/event notes upstream; ALTREP content is
+not fetched or treated as the canonical description. Plain TEXT escaping remains
+unchanged, and the same parser serves vCard fields. Handler regressions cover task
+and event create/edit, while the native OWA task lifecycle verifies plain bodies
+on create/update and fresh readback. Existing corrupted notes require explicit
+user correction; no content migration or guessed cleanup is performed.
+
 Task detail synchronization now includes native category names, plain-note
 projection with rich-note preservation on unrelated edits, DATE-only metadata,
 strict scheduled repetition and authenticated native file links/downloads. A

@@ -24,7 +24,7 @@ func TestCalDAVNativeTaskReadbackAfterCreationAndRestart(t *testing.T) {
 		legacyID: {"__type": "Task:#Exchange", "ItemId": map[string]any{"Id": legacyID}, "Subject": "Already in Outlook", "Status": "NotStarted", "PercentComplete": 0},
 	}
 	creates := 0
-	_, upstream := newFake(t, func(action string, req map[string]any) any {
+	f, upstream := newFake(t, func(action string, req map[string]any) any {
 		mu.Lock()
 		defer mu.Unlock()
 		switch action {
@@ -161,13 +161,19 @@ func TestCalDAVNativeTaskReadbackAfterCreationAndRestart(t *testing.T) {
 		t.Fatalf("existing cloud task readback=%d %s", rr.Code, rr.Body.String())
 	}
 	path := collection + uid + ".ics"
-	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:" + uid + "\r\nSUMMARY:Thunderbird task\r\nDESCRIPTION:Details\r\nDUE:20261016T100000Z\r\nSTATUS:NEEDS-ACTION\r\nPRIORITY:1\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:" + uid + "\r\nSUMMARY:Thunderbird task\r\n" +
+		`DESCRIPTION;ALTREP="data:text/html;charset=utf-8,%3Cp%3EHTML%3C/p%3E":Details` +
+		"\r\nDUE:20261016T100000Z\r\nSTATUS:NEEDS-ACTION\r\nPRIORITY:1\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
 	if rr := request("PUT", path, ics); rr.Code != http.StatusCreated {
 		t.Fatalf("create=%d %s", rr.Code, rr.Body.String())
 	}
+	native := arr(f.last("CreateItem").Body, "Body", "Items")[0]
+	if str(native, "Body", "BodyType") != "Text" || str(native, "Body", "Value") != "Details" {
+		t.Fatalf("description metadata leaked into native create: %+v", native)
+	}
 	// No adapter-memory or handler-memory UID map may be needed to read back.
 	h = newHandler()
-	if rr := request("GET", path, ""); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "UID:"+uid+"\r\n") || !strings.Contains(rr.Body.String(), "SUMMARY:Thunderbird task") || !strings.Contains(rr.Body.String(), "DUE:20261016T100000Z") || !strings.Contains(rr.Body.String(), "BEGIN:VTODO") || strings.Contains(rr.Body.String(), "BEGIN:VEVENT") {
+	if rr := request("GET", path, ""); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "UID:"+uid+"\r\n") || !strings.Contains(rr.Body.String(), "SUMMARY:Thunderbird task") || !strings.Contains(rr.Body.String(), "DESCRIPTION:Details\r\n") || !strings.Contains(rr.Body.String(), "DUE:20261016T100000Z") || !strings.Contains(rr.Body.String(), "BEGIN:VTODO") || strings.Contains(rr.Body.String(), "BEGIN:VEVENT") {
 		t.Fatalf("GET after native task create/restart=%d %s", rr.Code, rr.Body.String())
 	}
 	report := `<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:prop><C:calendar-data/></D:prop><C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VTODO"/></C:comp-filter></C:filter></C:calendar-query>`
@@ -192,8 +198,21 @@ func TestCalDAVNativeTaskReadbackAfterCreationAndRestart(t *testing.T) {
 		}
 	}
 	updated := strings.ReplaceAll(ics, "Thunderbird task", "Updated task")
+	updated = strings.Replace(updated, ":Details", ":Edited notes: literal <tag> & text", 1)
 	if rr := request("PUT", path, updated); rr.Code != http.StatusNoContent {
 		t.Fatalf("repeat PUT must update=%d %s", rr.Code, rr.Body.String())
+	}
+	bodyUpdates := 0
+	for _, update := range arr(arr(f.last("UpdateItem").Body, "Body", "ItemChanges")[0], "Updates") {
+		if str(update, "Path", "FieldURI") == "Body" {
+			bodyUpdates++
+			if str(update, "Item", "Body", "BodyType") != "Text" || str(update, "Item", "Body", "Value") != "Edited notes: literal <tag> & text" {
+				t.Fatalf("description metadata leaked into native edit: %+v", update)
+			}
+		}
+	}
+	if bodyUpdates != 1 {
+		t.Fatalf("edited task notes missing or repeated: %d body updates", bodyUpdates)
 	}
 	completed := strings.ReplaceAll(updated, "STATUS:NEEDS-ACTION", "STATUS:COMPLETED")
 	if rr := request("PUT", path, completed); rr.Code != http.StatusNoContent {

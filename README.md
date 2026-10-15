@@ -269,9 +269,14 @@ fidelity remain limited.
 
 Task category names and plain notes now map end to end. Native HTML-only notes
 are presented as plain DESCRIPTION text; unchanged notes retain their original
-rich formatting upstream. Existing reminders and native progress/state are
-preserved on unrelated edits rather than reset to a guessed value. Reminder
-editing through VTODO alarms is still unsupported.
+rich formatting upstream. Quoted iCalendar parameters such as Thunderbird's
+`DESCRIPTION;ALTREP="data:text/html,..."` are kept separate from the plain notes;
+ALTREP content is not fetched or imported into the upstream body. The same
+quoted-parameter handling applies to event descriptions and contact fields.
+Existing reminders and native progress/state are preserved on unrelated edits
+rather than reset to a guessed value. Reminder editing through VTODO alarms is
+still unsupported. Already-corrupted notes are not automatically rewritten;
+refresh, correct the description, and save it again after upgrading.
 
 Thunderbird DATE-only start/due values retain DATE precision through restart,
 using native task metadata. Existing ISO date/time values remain supported;

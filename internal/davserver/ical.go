@@ -95,14 +95,31 @@ func unfold(data []byte) []string {
 }
 
 func parseProp(line string) (icalProp, bool) {
-	colon := strings.Index(line, ":")
+	// Quoted parameters (e.g. Thunderbird's ALTREP data URL) may contain separators.
+	var parts []string
+	start, colon := 0, -1
+	quoted := false
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '"':
+			quoted = !quoted
+		case ';', ':':
+			if !quoted {
+				parts = append(parts, line[start:i])
+				start = i + 1
+				if line[i] == ':' {
+					colon = i
+				}
+			}
+		}
+		if colon >= 0 {
+			break
+		}
+	}
 	if colon < 0 {
 		return icalProp{}, false
 	}
-	head, val := line[:colon], line[colon+1:]
-	p := icalProp{Name: "", Params: map[string]string{}, Value: val}
-	parts := strings.Split(head, ";")
-	p.Name = strings.ToUpper(parts[0])
+	p := icalProp{Name: strings.ToUpper(parts[0]), Params: map[string]string{}, Value: line[colon+1:]}
 	for _, kv := range parts[1:] {
 		k, v, ok := strings.Cut(kv, "=")
 		if ok {
