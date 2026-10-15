@@ -93,7 +93,9 @@ which is accepted behaviour, not a defect.
   must be exhausted first).
 - Silently mangling data (recurrences, time zones, flags, task state)
   in translation. Lossy behaviour must be visible in logs at minimum.
-- Storing tokens/passwords/headers or message bodies in logs.
+- Storing tokens/passwords/authentication or cookie headers in logs. Personal
+  payload contents are excluded at normal/debug levels; the later explicit
+  upstream-payload request authorizes them only at trace for local diagnosis.
 
 ## Decided constraints (from the project owner)
 
@@ -153,10 +155,18 @@ which is accepted behaviour, not a defect.
     human-relevant events: listeners up (interface/ports), account
     discovered, channel selected, login window needed, silent renewal
     succeeded/failed, re-login completed, upstream errors that affect
-    the user. Protocol-translation detail, request/response shapes,
-    timings and probe attempts go to debug. No nonsense logging:
-    no per-message info spam, no tokens/passwords/headers/bodies at
-    any level (bodies not even at trace; token material never).
+    the user. Protocol-translation summaries, timings and probe attempts go to
+    debug. No per-message info spam. The subsequent explicit payload-tracing
+    request permits personal upstream request/response contents at trace only,
+    never credentials, tokens, HTTP authentication/cookie headers or browser
+    token-exchange traffic. Complete JSON diagnostics capture at most 64 KiB and
+    render at most 48 KiB of sanitized JSON. Oversized, incomplete/malformed or
+    opaque non-JSON bodies and known native MIME/file byte fields inside JSON
+    are omitted explicitly rather than exposing reversibly encoded secrets.
+    Trace request/response records share a per-process request ID. OWA tees only
+    bytes its existing decoder consumes; Graph uses its existing byte buffer.
+    No extra body reads/formatting when trace is disabled; parsing, download
+    limits, auth recovery and wire data remain unchanged.
     The later contextual-logging request moves individual IMAP command records
     to trace and adds account, remote address, tag, TLS/authentication state and
     selected-mailbox context, without logging command arguments or literals.

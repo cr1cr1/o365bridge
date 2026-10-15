@@ -285,14 +285,33 @@ The bridge logs with zerolog at human level by default: listener
 startup, per-account authentication (success at info, failure as a
 warning), operations such as IMAP append/copy/move, SMTP sends,
 and CalDAV/CardDAV puts/deletes, plus a warning with the upstream
-error whenever an operation fails for an account. Passwords,
-tokens, headers and message bodies are never logged. Protocol
-detail is available with `--log-level debug`. Individual `imap command`
+error whenever an operation fails for an account. Passwords, tokens and HTTP
+authentication/cookie headers are excluded. Personal content is not logged at
+info/debug; explicit trace enables upstream payload diagnostics (see below).
+Protocol summaries are available with `--log-level debug`. Individual `imap command`
 records are trace-only (`--log-level trace`): account (empty before login),
 remote connection address, command tag/name, authentication/TLS state, and
 selected mailbox context. Command arguments, passwords, SASL responses and
 APPEND literals are not included. Authentication and failure records keep
 their normal info/warning levels.
+
+To diagnose native upstream requests, restart with `--log-level trace`
+(and optionally `--log-format json`). OWA and Graph provider HTTP calls emit
+separate request/response payload records with account, channel, operation and
+request correlation. Browser sign-in and OAuth token exchanges are not traced.
+Known session secrets and credential fields are redacted; HTTP auth/cookie
+headers are never included. Only complete JSON is rendered: capture is bounded
+to 64 KiB and sanitized JSON output to 48 KiB. Oversized, incomplete, malformed
+and opaque non-JSON MIME/base64/binary bodies are omitted with a reason and
+observed-byte count, never dumped as unsafe prefixes. Known native MIME/file
+byte fields inside JSON are also omitted: base64 is reversible, not redaction.
+Tracing does not change request bytes, response parsing, or existing attachment
+size limits.
+
+**Trace logs contain personal mail, calendar, task and contact content.** Keep
+them private, capture only one reproduction, inspect/redact
+before sharing, then return to info/debug and remove the capture when no longer
+needed. Redaction is not an anonymization guarantee.
 
 ## State and resetting an account
 

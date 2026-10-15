@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/cr1cr1/o365bridge/internal/bridge"
+	"github.com/cr1cr1/o365bridge/internal/upstreamlog"
 )
 
 type Factory struct {
@@ -104,29 +105,46 @@ func (p *provider) call(ctx context.Context, action string, payload any) (any, e
 		}
 		req.Header.Set("Cookie", strings.Join(parts, "; "))
 	}
+	trace := p.log.Trace().Enabled()
+	var requestID uint64
+	if trace {
+		requestID = upstreamlog.NextID()
+		p.logPayload(action, requestID, "request", 0, data, int64(len(data)), false)
+	}
 	start := time.Now()
 	resp, err := p.http.Do(req)
 	if err != nil {
+		if trace {
+			p.logPayload(action, requestID, "response", 0, nil, 0, true)
+		}
 		p.logUpstream(zerolog.WarnLevel, action, 0, time.Since(start), err.Error())
 		return nil, bridge.Wrap(bridge.KindTransient, "owa: "+action, err)
 	}
 	defer resp.Body.Close()
+	var responseBody io.Reader = resp.Body
+	var captured upstreamlog.Capture
+	if trace {
+		responseBody = io.TeeReader(responseBody, &captured)
+	}
 	var raw map[string]any
 	var decErr error
 	if action == "GetAttachment" {
 		if resp.ContentLength > maxTaskAttachmentResponseBytes {
 			decErr = fmt.Errorf("attachment response exceeds size limit")
 		} else {
-			limited := &io.LimitedReader{R: resp.Body, N: maxTaskAttachmentResponseBytes + 1}
+			limited := &io.LimitedReader{R: responseBody, N: maxTaskAttachmentResponseBytes + 1}
 			decErr = json.NewDecoder(limited).Decode(&raw)
 			if limited.N == 0 {
 				decErr = fmt.Errorf("attachment response exceeds size limit")
 			}
 		}
 	} else {
-		decErr = json.NewDecoder(resp.Body).Decode(&raw)
+		decErr = json.NewDecoder(responseBody).Decode(&raw)
 	}
 	dur := time.Since(start)
+	if trace {
+		p.logPayload(action, requestID, "response", resp.StatusCode, captured.Data, captured.Bytes, decErr != nil && decErr != io.EOF)
+	}
 	if resp.StatusCode == 440 {
 		p.logUpstream(zerolog.WarnLevel, action, resp.StatusCode, dur, "HTTP 440 login expired")
 		return nil, bridge.Wrap(bridge.KindAuth, fmt.Sprintf("owa: %s: HTTP 440 login expired", action), nil)
@@ -181,15 +199,32 @@ func (p *provider) call(ctx context.Context, action string, payload any) (any, e
 // duration, action and status per account; failures as warnings.
 // Never the credentials, cookies or payload bodies.
 func (p *provider) logUpstream(level zerolog.Level, action string, status int, dur time.Duration, errMsg string) {
-	ev := p.log.WithLevel(level).
-		Str("channel", "owa").Str("op", "http").Str("method", http.MethodPost).
-		Str("action", action).Str("account", p.email).Int("status", status).
+	ev := p.log.WithLevel(level)
+	if !ev.Enabled() {
+		return
+	}
+	ev.Str("channel", "owa").Str("op", "http").Str("method", http.MethodPost).
+		Str("action", upstreamlog.Text(action, p.sess)).Str("account", upstreamlog.Text(p.email, p.sess)).Int("status", status).
 		Str("duration", dur.String())
 	if errMsg != "" {
-		ev.Str("error", errMsg).Msg("owa upstream request failed")
+		ev.Str("error", upstreamlog.Text(errMsg, p.sess)).Msg("owa upstream request failed")
 		return
 	}
 	ev.Msg("owa upstream request")
+}
+
+func (p *provider) logPayload(action string, requestID uint64, direction string, status int, data []byte, captured int64, incomplete bool) {
+	ev := p.log.Trace()
+	if !ev.Enabled() {
+		return
+	}
+	ev.Str("channel", "owa").Str("op", "http").Str("method", http.MethodPost).
+		Str("action", upstreamlog.Text(action, p.sess)).Str("account", upstreamlog.Text(p.email, p.sess)).
+		Uint64("request_id", requestID).Str("direction", direction)
+	if direction == "response" {
+		ev.Int("status", status)
+	}
+	ev.Interface("payload", upstreamlog.Payload(data, captured, incomplete, "application/json", p.sess)).Msg("owa upstream payload")
 }
 
 // --- tolerant JSON navigation helpers ---

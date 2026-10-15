@@ -21,7 +21,8 @@ func TestOWACalendarListingLogsIdentityCountsWithoutContents(t *testing.T) {
 		item["Body"] = map[string]any{"Value": "private calendar body"}
 	}
 	var buf owaLogBuffer
-	lg := zerolog.New(&buf)
+	// Normal summaries exclude content; explicit trace separately allows payloads.
+	lg := zerolog.New(&buf).Level(zerolog.DebugLevel)
 	p := newLoggedFake(t, func(action string, _ map[string]any) any {
 		if action == "FindItem" {
 			return okBody(map[string]any{"RootFolder": map[string]any{"Items": []any{

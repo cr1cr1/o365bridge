@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/cr1cr1/o365bridge/internal/bridge"
+	"github.com/cr1cr1/o365bridge/internal/upstreamlog"
 )
 
 const defaultBaseURL = "https://graph.microsoft.com"
@@ -24,8 +25,8 @@ type Factory struct {
 	BaseURL string
 	HTTP    *http.Client
 	// Logger receives one debug line per upstream Graph call
-	// (method, resource, status, duration) and a warning on
-	// failure. Nil disables logging.
+	// (method, resource, status, duration), trace-only sanitized
+	// payload records, and a warning on failure. Nil disables logging.
 	Logger *zerolog.Logger
 }
 
@@ -118,9 +119,18 @@ func (p *provider) doBytesLimit(ctx context.Context, method, resource string, pa
 	for k, v := range extraHeaders {
 		req.Header.Set(k, v)
 	}
+	trace := p.log.Trace().Enabled()
+	var requestID uint64
+	if trace {
+		requestID = upstreamlog.NextID()
+		p.logPayload(method, resource, requestID, "request", 0, payload, contentType, false)
+	}
 	start := time.Now()
 	resp, err := p.http.Do(req)
 	if err != nil {
+		if trace {
+			p.logPayload(method, resource, requestID, "response", 0, nil, "", true)
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -134,6 +144,10 @@ func (p *provider) doBytesLimit(ctx context.Context, method, resource string, pa
 	}
 	data, err := io.ReadAll(responseBody)
 	dur := time.Since(start)
+	if trace {
+		incomplete := err != nil || maxBytes > 0 && int64(len(data)) > maxBytes
+		p.logPayload(method, resource, requestID, "response", resp.StatusCode, data, resp.Header.Get("Content-Type"), incomplete)
+	}
 	if err != nil {
 		p.logUpstream(zerolog.WarnLevel, method, resource, resp.StatusCode, dur, "read response: "+err.Error())
 		return nil, bridge.Wrap(bridge.KindTransient, "graph: read response", err)
@@ -165,18 +179,29 @@ func (p *provider) doBytesLimit(ctx context.Context, method, resource string, pa
 
 // logUpstream emits one line per upstream Graph round trip: duration,
 // method, resource and status per account; failures as warnings.
-// Never the token, headers or bodies. The resource may carry user
-// query terms; that is the point of the log line.
+// Credentials are redacted; payload diagnostics have separate trace records.
 func (p *provider) logUpstream(level zerolog.Level, method, resource string, status int, dur time.Duration, errMsg string) {
-	ev := p.log.WithLevel(level).
-		Str("channel", "graph").Str("op", "http").Str("method", method).
-		Str("resource", resource).Str("account", p.email).Int("status", status).
+	ev := p.log.WithLevel(level)
+	if !ev.Enabled() {
+		return
+	}
+	ev.Str("channel", "graph").Str("op", "http").Str("method", method).
+		Str("resource", upstreamlog.Text(resource, p.session)).Str("account", upstreamlog.Text(p.email, p.session)).Int("status", status).
 		Str("duration", dur.String())
 	if errMsg != "" {
-		ev.Str("error", errMsg).Msg("graph upstream request failed")
+		ev.Str("error", upstreamlog.Text(errMsg, p.session)).Msg("graph upstream request failed")
 		return
 	}
 	ev.Msg("graph upstream request")
+}
+
+// logPayload is called only when trace is enabled, using already-buffered bytes.
+func (p *provider) logPayload(method, resource string, requestID uint64, direction string, status int, data []byte, contentType string, incomplete bool) {
+	p.log.Trace().Str("channel", "graph").Str("op", "http").Str("method", method).
+		Str("resource", upstreamlog.Text(resource, p.session)).Str("account", upstreamlog.Text(p.email, p.session)).
+		Uint64("request_id", requestID).Str("direction", direction).Int("status", status).
+		Interface("payload", upstreamlog.Payload(data, int64(len(data)), incomplete, contentType, p.session)).
+		Msg("graph upstream payload")
 }
 
 func (p *provider) doJSON(ctx context.Context, method, resource string, body, out any) error {
