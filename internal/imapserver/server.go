@@ -407,7 +407,13 @@ func (ss *session) dispatch(line string, lits [][]byte) bool {
 		rest = r2
 	}
 	ss.cmd = cmdUpper
-	ss.srv.logger.Debug().Str("cmd", cmdUpper).Bool("auth", ss.email != "").Msg("imap command")
+	ev := ss.srv.logger.Trace().Str("protocol", "imap").Str("op", strings.ToLower(cmdUpper)).
+		Str("account", ss.email).Str("remote", ss.remote).Str("tag", tag).
+		Str("cmd", cmdUpper).Bool("auth", ss.email != "").Bool("secure", ss.secure)
+	if ss.sel != nil {
+		ev = ev.Str("mailbox", ss.sel.name).Bool("readonly", ss.sel.readonly)
+	}
+	ev.Msg("imap command")
 
 	if ss.requiresTLS() && (cmdUpper == "LOGIN" || cmdUpper == "AUTHENTICATE") {
 		_ = ss.tagged(tag, "NO", "[PRIVACYREQUIRED] TLS is required before authentication")

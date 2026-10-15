@@ -287,7 +287,12 @@ warning), operations such as IMAP append/copy/move, SMTP sends,
 and CalDAV/CardDAV puts/deletes, plus a warning with the upstream
 error whenever an operation fails for an account. Passwords,
 tokens, headers and message bodies are never logged. Protocol
-detail is available with `--log-level debug`.
+detail is available with `--log-level debug`. Individual `imap command`
+records are trace-only (`--log-level trace`): account (empty before login),
+remote connection address, command tag/name, authentication/TLS state, and
+selected mailbox context. Command arguments, passwords, SASL responses and
+APPEND literals are not included. Authentication and failure records keep
+their normal info/warning levels.
 
 ## State and resetting an account
 

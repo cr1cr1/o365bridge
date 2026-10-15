@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
@@ -598,6 +599,150 @@ func TestIMAPUnauthenticatedCommandWarnLogged(t *testing.T) {
 	for _, want := range []string{`"level":"warn"`, `"protocol":"imap"`, `"op":"select"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("log missing %s: %s", want, out)
+		}
+	}
+}
+
+func TestIMAPCommandTraceContext(t *testing.T) {
+	for _, secure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("secure=%t", secure), func(t *testing.T) {
+			buf := &lockedBuffer{}
+			logger := zerolog.New(buf).Level(zerolog.TraceLevel)
+			var c *client
+			if secure {
+				serverConfig, clientConfig := imapTLSConfigs(t)
+				_, ln := startConfiguredIMAP(t, logger, func(s *imapserver.Server) {
+					s.TLSConfig, s.StartTLS = serverConfig, true
+				})
+				c = dial(t, ln)
+				upgradeIMAPClient(t, c, clientConfig)
+				buf.Reset()
+			} else {
+				_, ln := startServerWithLogger(t, logger)
+				c = dial(t, ln)
+			}
+			type command struct {
+				tag, line, status, account, mailbox, literal string
+				readonly                                     bool
+			}
+			encoded := base64.StdEncoding.EncodeToString([]byte("\x00" + testEmail + "\x00private-auth-password"))
+			commands := []command{
+				{tag: "pre", line: "SELECT INBOX", status: "NO"},
+				{tag: "badlogin", line: "LOGIN " + testEmail + " private-login-password", status: "NO"},
+				{tag: "badauth", line: "AUTHENTICATE PLAIN " + encoded, status: "NO"},
+				{tag: "login", line: "LOGIN USER@EXAMPLE.COM", literal: testPassword, status: "OK"},
+				{tag: "post", line: "NOOP", status: "OK", account: testEmail},
+				{tag: "select", line: "SELECT INBOX", status: "OK", account: testEmail},
+				{tag: "uid", line: "uId sEaRcH TEXT private-search-argument", status: "OK", account: testEmail, mailbox: "INBOX"},
+				{tag: "unselect", line: "UNSELECT", status: "OK", account: testEmail, mailbox: "INBOX"},
+				{tag: "unselected", line: "NOOP", status: "OK", account: testEmail},
+				{tag: "examine", line: "EXAMINE \"Sent Items\"", status: "OK", account: testEmail},
+				{tag: "readonly", line: "NOOP", status: "OK", account: testEmail, mailbox: "Sent Items", readonly: true},
+				{tag: "unselectro", line: "UNSELECT", status: "OK", account: testEmail, mailbox: "Sent Items", readonly: true},
+			}
+			for _, cmd := range commands {
+				var resp []string
+				if cmd.literal == "" {
+					resp = c.cmd(cmd.tag, cmd.line)
+				} else {
+					if _, err := fmt.Fprintf(c.conn, "%s %s {%d}\r\n", cmd.tag, cmd.line, len(cmd.literal)); err != nil {
+						t.Fatal(err)
+					}
+					if cont := c.readLine(); !strings.HasPrefix(cont, "+") {
+						t.Fatalf("continuation = %q", cont)
+					}
+					if _, err := c.conn.Write([]byte(cmd.literal)); err != nil {
+						t.Fatal(err)
+					}
+					resp = c.readUntil(cmd.tag)
+				}
+				if !strings.Contains(joined(resp), cmd.tag+" "+cmd.status) {
+					t.Fatalf("%s response: %s", cmd.tag, joined(resp))
+				}
+			}
+			raw := sampleRaw("private-literal-subject", "private-literal-body")
+			if _, err := fmt.Fprintf(c.conn, "append APPEND INBOX {%d}\r\n", len(raw)); err != nil {
+				t.Fatal(err)
+			}
+			if cont := c.readLine(); !strings.HasPrefix(cont, "+") {
+				t.Fatalf("continuation = %q", cont)
+			}
+			if _, err := c.conn.Write([]byte(raw)); err != nil {
+				t.Fatal(err)
+			}
+			if resp := joined(c.readUntil("append")); !strings.Contains(resp, "append OK") {
+				t.Fatalf("APPEND: %s", resp)
+			}
+			commands = append(commands, command{tag: "append", line: "APPEND", account: testEmail})
+			out := buf.String()
+			for _, secret := range []string{testPassword, "private-login-password", "private-auth-password", encoded, "private-search-argument", "private-literal-subject", "private-literal-body", "USER@EXAMPLE.COM"} {
+				if strings.Contains(out, secret) {
+					t.Fatalf("log leaked %q: %s", secret, out)
+				}
+			}
+			events := map[string]map[string]any{}
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				var event map[string]any
+				if err := json.Unmarshal([]byte(line), &event); err != nil {
+					t.Fatal(err)
+				}
+				if event["message"] == "imap command" {
+					tag, _ := event["tag"].(string)
+					if _, exists := events[tag]; exists {
+						t.Fatalf("duplicate command log for %q", tag)
+					}
+					events[tag] = event
+				}
+			}
+			if len(events) != len(commands) {
+				t.Fatalf("got %d command logs, want %d: %s", len(events), len(commands), out)
+			}
+			for _, cmd := range commands {
+				name := strings.ToUpper(strings.Fields(cmd.line)[0])
+				if name == "UID" {
+					name += " " + strings.ToUpper(strings.Fields(cmd.line)[1])
+				}
+				want := map[string]any{
+					"level": "trace", "message": "imap command", "protocol": "imap", "op": strings.ToLower(name),
+					"account": cmd.account, "remote": c.conn.LocalAddr().String(), "tag": cmd.tag, "cmd": name,
+					"auth": cmd.account != "", "secure": secure,
+				}
+				if cmd.mailbox != "" {
+					want["mailbox"], want["readonly"] = cmd.mailbox, cmd.readonly
+				}
+				event := events[cmd.tag]
+				if len(event) != len(want) {
+					t.Errorf("%s fields = %v, want %v", cmd.tag, event, want)
+				}
+				for key, value := range want {
+					if got, exists := event[key]; !exists || got != value {
+						t.Errorf("%s %s = %v (present=%t), want %v", cmd.tag, key, got, exists, value)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestIMAPCommandTraceHiddenAtDebug(t *testing.T) {
+	buf := &lockedBuffer{}
+	_, ln := startServerWithLogger(t, zerolog.New(buf).Level(zerolog.DebugLevel))
+	c := dial(t, ln)
+	c.cmd("pre", "SELECT INBOX")
+	c.cmd("bad", "LOGIN "+testEmail+" wrong-password")
+	c.login("login")
+	c.cmd("post", "NOOP")
+	out := buf.String()
+	if strings.Contains(out, `"message":"imap command"`) {
+		t.Fatalf("command trace visible at debug: %s", out)
+	}
+	for _, want := range []string{
+		`"level":"warn","protocol":"imap","op":"select"`,
+		`"level":"warn","protocol":"imap","op":"auth"`,
+		`"level":"info","protocol":"imap","op":"auth"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("existing warning/auth severity missing %s: %s", want, out)
 		}
 	}
 }

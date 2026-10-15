@@ -157,6 +157,10 @@ which is accepted behaviour, not a defect.
     timings and probe attempts go to debug. No nonsense logging:
     no per-message info spam, no tokens/passwords/headers/bodies at
     any level (bodies not even at trace; token material never).
+    The later contextual-logging request moves individual IMAP command records
+    to trace and adds account, remote address, tag, TLS/authentication state and
+    selected-mailbox context, without logging command arguments or literals.
+    Existing authentication/failure info and warning levels are unchanged.
 
 ## Architecture
 
