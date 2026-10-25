@@ -1473,6 +1473,36 @@ func TestLSUBHidesUnsubscribedFolders(t *testing.T) {
 	}
 }
 
+// A MOVE whose destination is the selected folder itself is a delete
+// gesture (Thunderbird plain delete inside trash): the message must be
+// removed upstream, not no-op moved.
+func TestMoveToSameFolderDeletesPermanently(t *testing.T) {
+	prov, ln := startServer(t)
+	id := prov.addMessage("trash", sampleRaw("in trash", "to be gone"), nil, time.Now())
+	c := dial(t, ln)
+	c.login("a")
+	if r := c.cmd("a", "SELECT \"Deleted Items\""); !strings.Contains(joined(r), "a OK") {
+		t.Fatalf("SELECT trash: %s", joined(r))
+	}
+	if r := c.cmd("b", "UID MOVE 1 \"Deleted Items\""); !strings.Contains(joined(r), "b OK") {
+		t.Fatalf("MOVE to same folder: %s", joined(r))
+	}
+	prov.mu.Lock()
+	gone := true
+	for _, ids := range prov.msgs["trash"] {
+		if ids.meta.ID == id {
+			gone = false
+		}
+	}
+	prov.mu.Unlock()
+	if !gone {
+		t.Fatal("message still upstream after MOVE to same folder")
+	}
+	if r := c.cmd("c", "SELECT \"Deleted Items\""); !strings.Contains(joined(r), "* 0 EXISTS") {
+		t.Fatalf("trash not empty after reselect: %s", joined(r))
+	}
+}
+
 // The unsubscribed set lives in idmap.json and survives a restart.
 func TestSubscriptionPersistsAcrossRestart(t *testing.T) {
 	dir := t.TempDir()

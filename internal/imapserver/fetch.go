@@ -227,9 +227,19 @@ func (ss *session) cmdCopyMove(tag, rest string, lits [][]byte, uidMode bool, mo
 	}
 	srcFolder := ss.sel.folder.ID
 	if move {
-		err = ss.call(func(ctx context.Context, p bridge.Provider) error {
-			return p.MoveMessages(ctx, srcFolder, ids, dest.ID)
-		})
+		if dest.ID == srcFolder {
+			// A move into the selected folder itself is the client's
+			// delete gesture (e.g. plain delete inside trash): the
+			// upstream move would be a no-op and the message would
+			// reappear on the next select. Remove it for good.
+			err = ss.call(func(ctx context.Context, p bridge.Provider) error {
+				return p.DeleteMessages(ctx, srcFolder, ids)
+			})
+		} else {
+			err = ss.call(func(ctx context.Context, p bridge.Provider) error {
+				return p.MoveMessages(ctx, srcFolder, ids, dest.ID)
+			})
+		}
 	} else {
 		err = ss.call(func(ctx context.Context, p bridge.Provider) error {
 			return p.CopyMessages(ctx, srcFolder, ids, dest.ID)
