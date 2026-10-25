@@ -94,12 +94,6 @@ func startMulti(t *testing.T, provs map[string]*fakeProvider) (addr string, clea
 
 func startWithLogger(t *testing.T, p *fakeProvider, logger zerolog.Logger) (addr string, cleanup func()) {
 	t.Helper()
-	addr, _, cleanup = startWithRegAndLogger(t, p, logger)
-	return addr, cleanup
-}
-
-func startWithRegAndLogger(t *testing.T, p *fakeProvider, logger zerolog.Logger) (string, *bridge.Registry, func()) {
-	t.Helper()
 	reg, err := bridge.NewRegistry(bridge.Config{
 		StateDir: t.TempDir(), Login: fakeLogin{}, Factory: fakeFactory{p: p},
 	})
@@ -112,43 +106,7 @@ func startWithRegAndLogger(t *testing.T, p *fakeProvider, logger zerolog.Logger)
 		t.Fatal(err)
 	}
 	go func() { _ = srv.Serve(l) }()
-	return l.Addr().String(), reg, func() { _ = srv.Close() }
-}
-
-// A successful send must record the Message-ID so the IMAP APPEND of
-// the client's Sent copy can deduplicate against the copy the upstream
-// send already stored.
-func TestSMTPSendRecordsSentCopyForDedupe(t *testing.T) {
-	addr, reg, done := startWithRegAndLogger(t, &fakeProvider{}, zerolog.Nop())
-	defer done()
-	cl := dial(t, addr)
-	defer cl.c.Close()
-	cl.cmd(t, "EHLO client.example")
-	if r := cl.cmd(t, "AUTH PLAIN %s", authPlain(acct, pw)); !strings.HasPrefix(r, "235") {
-		t.Fatalf("auth = %q", r)
-	}
-	if r := cl.cmd(t, "MAIL FROM:<%s>", acct); !strings.HasPrefix(r, "250") {
-		t.Fatalf("MAIL = %q", r)
-	}
-	if r := cl.cmd(t, "RCPT TO:<dest@example.com>"); !strings.HasPrefix(r, "250") {
-		t.Fatalf("RCPT = %q", r)
-	}
-	if r := cl.cmd(t, "DATA"); !strings.HasPrefix(r, "354") {
-		t.Fatalf("DATA = %q", r)
-	}
-	mime := "From: user@example.com\r\nMessage-ID: <mid-1@example.com>\r\nSubject: s\r\n\r\nbody\r\n.\r\n"
-	if _, err := cl.c.Write([]byte(mime)); err != nil {
-		t.Fatal(err)
-	}
-	if r := cl.readReply(t); !strings.HasPrefix(r, "250") {
-		t.Fatalf("DATA result = %q", r)
-	}
-	if !reg.SentCopyStored(acct, "<mid-1@example.com>") {
-		t.Fatal("sent message-id not recorded for dedupe")
-	}
-	if reg.SentCopyStored(acct, "<other@example.com>") {
-		t.Fatal("unrelated message-id recorded")
-	}
+	return l.Addr().String(), func() { _ = srv.Close() }
 }
 
 type client struct {

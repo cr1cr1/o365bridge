@@ -1,10 +1,6 @@
 package bridge
 
-import (
-	"context"
-	"testing"
-	"time"
-)
+import "testing"
 
 func TestHeaderMessageID(t *testing.T) {
 	cases := []struct {
@@ -26,74 +22,3 @@ func TestHeaderMessageID(t *testing.T) {
 		}
 	}
 }
-
-func newSentTestRegistry(t *testing.T) (*Registry, *time.Time) {
-	t.Helper()
-	now := time.Now()
-	reg, err := NewRegistry(Config{
-		StateDir: t.TempDir(),
-		Login:    nopLogin{},
-		Factory:  nopFactory{},
-		Now:      func() time.Time { return now },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return reg, &now
-}
-
-func TestSentCopyRecordAndMatch(t *testing.T) {
-	reg, _ := newSentTestRegistry(t)
-	reg.RecordSentCopy("User@Example.com", "<dup@x>")
-	if !reg.SentCopyStored("user@example.com", "<DUP@X>") {
-		t.Fatal("stored copy not matched after normalization")
-	}
-	if reg.SentCopyStored("other@example.com", "<dup@x>") {
-		t.Fatal("matched another account")
-	}
-	if reg.SentCopyStored("user@example.com", "<other@x>") {
-		t.Fatal("matched another message-id")
-	}
-	if reg.SentCopyStored("user@example.com", "") {
-		t.Fatal("empty message-id matched")
-	}
-	reg.RecordSentCopy("user@example.com", "")
-	if reg.SentCopyStored("user@example.com", "") {
-		t.Fatal("empty record matched")
-	}
-}
-
-func TestSentCopyExpires(t *testing.T) {
-	reg, now := newSentTestRegistry(t)
-	reg.RecordSentCopy("user@example.com", "<old@x>")
-	*now = now.Add(sentCopyWindow + time.Second)
-	if reg.SentCopyStored("user@example.com", "<old@x>") {
-		t.Fatal("entry survived past the window")
-	}
-}
-
-func TestSentCopyPrunesOtherEntries(t *testing.T) {
-	reg, now := newSentTestRegistry(t)
-	reg.RecordSentCopy("user@example.com", "<a@x>")
-	*now = now.Add(sentCopyWindow + time.Second)
-	reg.RecordSentCopy("user@example.com", "<b@x>")
-	reg.sentMu.Lock()
-	n := len(reg.sent)
-	reg.sentMu.Unlock()
-	if n != 1 {
-		t.Fatalf("prune left %d entries, want 1", n)
-	}
-}
-
-type nopLogin struct{}
-
-func (nopLogin) Login(_ context.Context, _ string, _ Channel) (Session, error) {
-	return Session{}, nil
-}
-func (nopLogin) Renew(_ context.Context, _ string, s Session) (Session, error) {
-	return s, nil
-}
-
-type nopFactory struct{}
-
-func (nopFactory) New(_ string, _ Session) Provider { return nil }

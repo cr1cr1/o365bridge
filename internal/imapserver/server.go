@@ -1014,17 +1014,41 @@ func (ss *session) cmdAppend(tag, rest string, lits [][]byte) {
 	}
 	// The upstream send already stored a Sent copy (SendAndSaveCopy /
 	// sendMail); a client that also "places a copy in Sent" (the
-	// Thunderbird default) would create a duplicate. Gmail-like
-	// semantics: the appended copy maps to the already-stored one.
+	// Thunderbird default) would create a duplicate. Compare the
+	// appended Message-ID against the newest page of the folder — the
+	// send copy is the newest item — and skip storing when it is
+	// already there. Gmail-like semantics: deleting the visible copy
+	// deletes the sent mail itself.
 	if folder.Special == "sent" {
-		if mid := bridge.HeaderMessageID(raw); mid != "" && ss.srv.reg.SentCopyStored(ss.email, mid) {
-			ss.srv.logger.Info().Str("protocol", "imap").Str("op", "append").Str("account", ss.email).
-				Str("folder", name).Str("folder_id", folder.ID).Msg("imap append deduped sent copy")
-			_ = ss.tagged(tag, "OK", "APPEND completed (sent copy already stored)")
-			if ss.sel != nil && ss.sel.folder.ID == folder.ID {
-				_ = ss.refreshSelected()
+		if mid := bridge.HeaderMessageID(raw); mid != "" {
+			found := false
+			err := ss.call(func(ctx context.Context, p bridge.Provider) error {
+				metas, _, err := p.ListMessages(ctx, folder.ID, 0, 50)
+				if err != nil {
+					return err
+				}
+				for _, m := range metas {
+					if m.MessageID == mid {
+						found = true
+						break
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				// The check is best-effort: when the folder cannot be
+				// listed, store the copy as before rather than fail.
+				ss.srv.logger.Warn().Err(err).Str("protocol", "imap").Str("op", "append").
+					Str("account", ss.email).Str("folder", name).Msg("sent copy check failed, storing append normally")
+			} else if found {
+				ss.srv.logger.Info().Str("protocol", "imap").Str("op", "append").Str("account", ss.email).
+					Str("folder", name).Str("folder_id", folder.ID).Msg("imap append deduped sent copy")
+				_ = ss.tagged(tag, "OK", "APPEND completed (sent copy already stored)")
+				if ss.sel != nil && ss.sel.folder.ID == folder.ID {
+					_ = ss.refreshSelected()
+				}
+				return
 			}
-			return
 		}
 	}
 	var newID string

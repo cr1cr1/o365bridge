@@ -147,12 +147,16 @@ func metaFromItem(item map[string]any, folderID string) bridge.MessageMeta {
 		To: recipients(item, "ToRecipients"), Date: date,
 		Flags: flagsFromItem(item), Size: int64(num(item, "Size")),
 		Attachments: boolean(item, "HasAttachments"),
+		MessageID:   str(item, "InternetMessageId"),
 	}
 }
 
 func findItemReq(folderID string, offset, limit int, extra map[string]any) map[string]any {
 	body := map[string]any{
-		"ItemShape":       map[string]any{"__type": "ItemResponseShape:#Exchange", "BaseShape": "IdOnly"},
+		"ItemShape": map[string]any{"__type": "ItemResponseShape:#Exchange", "BaseShape": "IdOnly",
+			// Needed to match a client's Sent copy against the copy
+			// the send itself stored (see imapserver cmdAppend).
+			"AdditionalProperties": []any{propURI("message:InternetMessageId")}},
 		"ParentFolderIds": []any{folderRef(folderID)},
 		"Traversal":       "Shallow",
 		"Paging":          map[string]any{"__type": "IndexedPageView:#Exchange", "BasePoint": "Beginning", "Offset": offset, "MaxEntriesReturned": limit},

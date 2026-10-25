@@ -45,18 +45,19 @@ type flagsCall struct {
 }
 
 type fakeProvider struct {
-	mu          sync.Mutex
-	folders     []bridge.Folder
-	msgs        map[string][]*fakeMsg
-	nextID      int
-	setFlags    []flagsCall
-	deleted     [][]string
-	copiedTo    []string
-	copiedIDs   []string
-	movedTo     []string
-	movedIDs    []string
-	appendedTo  []string
-	createdName []string
+	mu           sync.Mutex
+	folders      []bridge.Folder
+	msgs         map[string][]*fakeMsg
+	nextID       int
+	setFlags     []flagsCall
+	deleted      [][]string
+	copiedTo     []string
+	copiedIDs    []string
+	movedTo      []string
+	movedIDs     []string
+	appendedTo   []string
+	createdName  []string
+	failListMsgs bool
 }
 
 func newFakeProvider() *fakeProvider {
@@ -113,6 +114,9 @@ func (p *fakeProvider) RenameFolder(_ context.Context, id, name string) error {
 func (p *fakeProvider) ListMessages(_ context.Context, folderID string, offset, limit int) ([]bridge.MessageMeta, int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.failListMsgs {
+		return nil, 0, fmt.Errorf("fake: listing disabled")
+	}
 	all := p.msgs[folderID]
 	total := len(all)
 	if offset > len(all) {
@@ -355,6 +359,8 @@ func parseMeta(id, folderID string, raw []byte, flags bridge.Flags) bridge.Messa
 			m.From = v
 		case "to":
 			m.To = []string{v}
+		case "message-id":
+			m.MessageID = v
 		case "date":
 			if t, err := time.Parse(time.RFC1123Z, v); err == nil {
 				m.Date = t
@@ -512,28 +518,6 @@ func (c *client) login(tag string) {
 
 func joined(resp []string) string { return strings.Join(resp, "\n") }
 
-func startServerReg(t *testing.T) (*fakeProvider, *bridge.Registry, net.Listener) {
-	t.Helper()
-	prov := newFakeProvider()
-	reg, err := bridge.NewRegistry(bridge.Config{
-		StateDir: t.TempDir(),
-		Login:    fakeLogin{},
-		Factory:  fakeFactory{prov: prov},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := imapserver.New(reg, testPassword, zerolog.Nop())
-	srv.IdlePollInterval = 50 * time.Millisecond
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() { _ = srv.Close() })
-	return prov, reg, ln
-}
-
 func (c *client) appendLiteral(tag, mailbox, raw string) string {
 	c.t.Helper()
 	if _, err := fmt.Fprintf(c.conn, "%s APPEND %s {%d}\r\n", tag, mailbox, len(raw)); err != nil {
@@ -552,43 +536,68 @@ func sentCopyRaw(mid string) string {
 	return "From: a@b\r\nMessage-ID: " + mid + "\r\nSubject: s\r\n\r\nbody\r\n"
 }
 
+func appendedCount(p *fakeProvider) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.appendedTo)
+}
+
 // The upstream send already stores a Sent copy (SendAndSaveCopy), so a
 // client that also "places a copy in Sent" (the Thunderbird default)
-// must not create a second stored message. Deleting the visible copy
-// deletes the sent mail itself, as with Gmail.
-func TestAppendDedupesSentCopy(t *testing.T) {
-	prov, reg, ln := startServerReg(t)
+// must not create a second stored message: the append is compared
+// against the newest page of the Sent folder by Message-ID. Deleting
+// the visible copy deletes the sent mail itself, as with Gmail.
+func TestAppendDedupesSentCopyByFolderLookup(t *testing.T) {
+	prov, ln := startServer(t)
 	c := dial(t, ln)
 	c.login("a")
-	reg.RecordSentCopy(testEmail, "<dup@example.com>")
 
-	resp := c.appendLiteral("b", `"Sent Items"`, sentCopyRaw("<dup@example.com>"))
-	if !strings.Contains(resp, "b OK") {
+	// First append of <a@1>: nothing matches, stored normally.
+	if resp := c.appendLiteral("b", `"Sent Items"`, sentCopyRaw("<a@1>")); !strings.Contains(resp, "APPENDUID") {
+		t.Fatalf("first APPEND must report APPENDUID: %s", resp)
+	}
+	// Same Message-ID appended again: already stored, deduped.
+	resp := c.appendLiteral("c", `"Sent Items"`, sentCopyRaw("<a@1>"))
+	if !strings.Contains(resp, "c OK") {
 		t.Fatalf("deduped APPEND: %s", resp)
 	}
 	if strings.Contains(resp, "APPENDUID") {
 		t.Fatalf("deduped APPEND must not report APPENDUID: %s", resp)
 	}
-	prov.mu.Lock()
-	appended := len(prov.appendedTo)
-	prov.mu.Unlock()
-	if appended != 0 {
-		t.Fatalf("upstream append called %d times, want 0", appended)
+	if n := appendedCount(prov); n != 1 {
+		t.Fatalf("upstream append called %d times, want 1", n)
 	}
 
 	// Different Message-ID in Sent: a new message, stored normally.
-	if resp := c.appendLiteral("d", `"Sent Items"`, sentCopyRaw("<fresh@example.com>")); !strings.Contains(resp, "APPENDUID") {
+	if resp := c.appendLiteral("d", `"Sent Items"`, sentCopyRaw("<b@2>")); !strings.Contains(resp, "APPENDUID") {
 		t.Fatalf("fresh APPEND must report APPENDUID: %s", resp)
 	}
-	// Same recorded Message-ID, but not the Sent folder: stored normally.
-	if resp := c.appendLiteral("e", "INBOX", sentCopyRaw("<dup@example.com>")); !strings.Contains(resp, "APPENDUID") {
+	// Same Message-ID, but not the Sent folder: stored normally.
+	if resp := c.appendLiteral("e", "INBOX", sentCopyRaw("<a@1>")); !strings.Contains(resp, "APPENDUID") {
 		t.Fatalf("INBOX APPEND must report APPENDUID: %s", resp)
 	}
+	if n := appendedCount(prov); n != 3 {
+		t.Fatalf("upstream append called %d times, want 3", n)
+	}
+}
+
+// The folder lookup is best-effort: when listing fails, the copy is
+// stored as before instead of failing the APPEND.
+func TestAppendStoresSentCopyWhenLookupFails(t *testing.T) {
+	prov, ln := startServer(t)
+	c := dial(t, ln)
+	c.login("a")
+	if resp := c.appendLiteral("b", `"Sent Items"`, sentCopyRaw("<a@1>")); !strings.Contains(resp, "APPENDUID") {
+		t.Fatalf("seed APPEND: %s", resp)
+	}
 	prov.mu.Lock()
-	appended = len(prov.appendedTo)
+	prov.failListMsgs = true
 	prov.mu.Unlock()
-	if appended != 2 {
-		t.Fatalf("upstream append called %d times, want 2", appended)
+	if resp := c.appendLiteral("c", `"Sent Items"`, sentCopyRaw("<c@3>")); !strings.Contains(resp, "APPENDUID") {
+		t.Fatalf("fallback APPEND must store and report APPENDUID: %s", resp)
+	}
+	if n := appendedCount(prov); n != 2 {
+		t.Fatalf("upstream append called %d times, want 2", n)
 	}
 }
 

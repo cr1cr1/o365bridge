@@ -7,7 +7,12 @@ Items: the upstream send itself saves a copy (OWA `SendAndSaveCopy`,
 Graph `/me/sendMail`), and clients that "place a copy in Sent"
 (Thunderbird's default) append the same message again over IMAP.
 
-Fix: the SMTP path records the sent Message-ID for 10 minutes; an IMAP
-APPEND to the account's Sent folder within that window maps to the
-already-stored copy instead of creating a second one. Deleting the
+Fix: message listings now request the Message-ID (OWA
+`message:InternetMessageId` additional property, verified live; Graph
+`internetMessageId` select). An IMAP APPEND to the account's Sent
+folder compares the appended Message-ID against the newest page of the
+folder, where the send's copy is the newest item, and answers OK
+without storing when it is already there. Stateless: no map, no
+timeout; it works across restarts and at any later time. When the
+folder listing fails, the copy is stored as before. Deleting the
 visible copy deletes the sent mail itself, as with Gmail.

@@ -83,6 +83,7 @@ type MessageMeta struct {
 	Flags       Flags
 	Size        int64
 	Attachments bool
+	MessageID   string // Message-ID header value, when the provider lists it
 }
 
 // SearchCriteria is the push-downable subset of an IMAP SEARCH.

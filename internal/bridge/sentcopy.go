@@ -3,13 +3,7 @@ package bridge
 import (
 	"bytes"
 	"strings"
-	"time"
 )
-
-// sentCopyWindow is how long a sent Message-ID stays dedupe-eligible.
-// Clients append their Sent copy seconds after the SMTP accept, so the
-// window only needs to cover slow clients, not history.
-const sentCopyWindow = 10 * time.Minute
 
 // HeaderMessageID returns the trimmed Message-ID header value of a raw
 // MIME message, or "" when the header is absent. Only the header block
@@ -49,47 +43,4 @@ func HeaderMessageID(mime []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(value.String())
-}
-
-// RecordSentCopy remembers that the bridge sent a message with this
-// Message-ID for the account. Called after the upstream send succeeded
-// (SendAndSaveCopy / sendMail already stored a copy in Sent Items), so
-// the IMAP APPEND of the client's own Sent copy can be deduplicated.
-func (r *Registry) RecordSentCopy(email, messageID string) {
-	if messageID == "" {
-		return
-	}
-	r.sentMu.Lock()
-	defer r.sentMu.Unlock()
-	r.pruneSentLocked()
-	if r.sent == nil {
-		r.sent = map[string]time.Time{}
-	}
-	r.sent[sentCopyKey(email, messageID)] = r.cfg.Now()
-}
-
-// SentCopyStored reports whether RecordSentCopy recorded this
-// account/message-ID pair inside the dedupe window.
-func (r *Registry) SentCopyStored(email, messageID string) bool {
-	if messageID == "" {
-		return false
-	}
-	r.sentMu.Lock()
-	defer r.sentMu.Unlock()
-	r.pruneSentLocked()
-	_, ok := r.sent[sentCopyKey(email, messageID)]
-	return ok
-}
-
-func sentCopyKey(email, messageID string) string {
-	return NormalizeEmail(email) + "\x00" + strings.ToLower(messageID)
-}
-
-func (r *Registry) pruneSentLocked() {
-	now := r.cfg.Now()
-	for k, at := range r.sent {
-		if now.Sub(at) > sentCopyWindow {
-			delete(r.sent, k)
-		}
-	}
 }

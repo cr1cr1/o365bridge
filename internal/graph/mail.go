@@ -105,7 +105,8 @@ type graphMessage struct {
 	Flag             struct {
 		FlagStatus string `json:"flagStatus"`
 	} `json:"flag"`
-	HasAttachments bool `json:"hasAttachments"`
+	HasAttachments  bool   `json:"hasAttachments"`
+	InternetMessage string `json:"internetMessageId"`
 }
 
 func (g graphMessage) toMeta(folderID string) bridge.MessageMeta {
@@ -113,6 +114,7 @@ func (g graphMessage) toMeta(folderID string) bridge.MessageMeta {
 		ID: g.ID, FolderID: folderID, Subject: g.Subject,
 		From: g.From.EmailAddress.Address, To: addrList(g.ToRecipients),
 		Date: parseGraphTime(g.ReceivedDateTime), Attachments: g.HasAttachments,
+		MessageID: g.InternetMessage,
 	}
 	if g.IsRead {
 		m.Flags = append(m.Flags, `\seen`)
@@ -123,7 +125,7 @@ func (g graphMessage) toMeta(folderID string) bridge.MessageMeta {
 	return m
 }
 
-const msgSelect = "id,subject,from,toRecipients,receivedDateTime,isRead,flag,hasAttachments"
+const msgSelect = "id,subject,from,toRecipients,receivedDateTime,isRead,flag,hasAttachments,internetMessageId"
 
 func (p *provider) ListMessages(ctx context.Context, folderID string, offset, limit int) ([]bridge.MessageMeta, int, error) {
 	q := url.Values{}
