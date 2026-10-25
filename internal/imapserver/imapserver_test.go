@@ -59,6 +59,7 @@ type fakeProvider struct {
 	createdName    []string
 	failListMsgs   bool
 	failDeleteMsgs int // fail this many DeleteMessages calls
+	suspendListErr int // fail this many ListMessages with a suspension error
 	listMissesLeft int // simulate listing lag: hide results this many calls
 }
 
@@ -118,6 +119,10 @@ func (p *fakeProvider) RenameFolder(_ context.Context, id, name string) error {
 func (p *fakeProvider) ListMessages(_ context.Context, folderID string, offset, limit int) ([]bridge.MessageMeta, int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.suspendListErr > 0 {
+		p.suspendListErr--
+		return nil, 0, fmt.Errorf("owa: FindItem: ErrorAccountSuspendShowTierUpgrade: Account suspended")
+	}
 	if p.failListMsgs {
 		return nil, 0, fmt.Errorf("fake: listing disabled")
 	}
@@ -1299,6 +1304,36 @@ func TestExpungeRetriesWhenDeleteFails(t *testing.T) {
 	}
 	if len(prov.msgs["inbox"]) != 0 {
 		t.Fatalf("inbox len after expunge = %d, want 0", len(prov.msgs["inbox"]))
+	}
+}
+
+// A suspended upstream answers listings with success and zero items,
+// so the write-path suspension error must surface on IMAP too: the
+// first failing listing marks the account, later commands fail fast
+// with the reason instead of showing silently empty folders.
+func TestSuspendedAccountFailsIMAPWithReason(t *testing.T) {
+	prov, ln := startServer(t)
+	prov.addMessage("inbox", sampleRaw("Hidden", "x"), nil, time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC))
+	c := dial(t, ln)
+	c.login("a")
+	prov.mu.Lock()
+	prov.suspendListErr = 1
+	prov.mu.Unlock()
+	sel := c.cmd("b", "SELECT INBOX")
+	if !strings.Contains(joined(sel), "b NO") {
+		t.Fatalf("SELECT during suspension: %s", joined(sel))
+	}
+	// Fail-fast: no further upstream listing is attempted.
+	status := c.cmd("d", "STATUS INBOX (MESSAGES)")
+	j := joined(status)
+	if !strings.Contains(j, "d NO") || !strings.Contains(j, "suspended") {
+		t.Fatalf("STATUS must fail fast with the reason: %s", j)
+	}
+	prov.mu.Lock()
+	calls := prov.suspendListErr
+	prov.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("expected exactly one upstream probe, knob left = %d", calls)
 	}
 }
 

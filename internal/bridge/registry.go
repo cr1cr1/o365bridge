@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,20 @@ type Registry struct {
 
 	mu       sync.Mutex
 	inflight map[string]*loginFlight
+
+	// Account-level degradation (see trackDegraded).
+	degMu    sync.Mutex
+	degraded map[string]accountDegraded
+}
+
+// degradedProbeAfter is how long commands fail fast after a
+// suspension signal. Once it elapses, the next command goes through
+// as a probe: a failure re-arms the block, a success clears it, so a
+// verified account recovers within one interval.
+const degradedProbeAfter = 60 * time.Second
+
+type accountDegraded struct {
+	at time.Time
 }
 
 type loginFlight struct {
@@ -258,7 +273,7 @@ func (r *Registry) Call(ctx context.Context, email string, op func(context.Conte
 	// so recovery can tell "someone already replaced this session"
 	// apart from "this session is still the dead one".
 	base, _ := r.store.LoadAccount(email)
-	err = op(ctx, prov)
+	err = r.trackDegraded(email, op(ctx, prov))
 	if err == nil || !IsAuth(err) {
 		return err
 	}
@@ -281,7 +296,7 @@ func (r *Registry) Call(ctx context.Context, email string, op func(context.Conte
 		return r.cfg.Factory.New(email, sess), nil
 	})
 	if err == nil {
-		err = op(ctx, prov)
+		err = r.trackDegraded(email, op(ctx, prov))
 		if err == nil || !IsAuth(err) {
 			return err
 		}
@@ -318,5 +333,44 @@ func (r *Registry) Call(ctx context.Context, email string, op func(context.Conte
 	if err != nil {
 		return err
 	}
-	return op(ctx, prov)
+	return r.trackDegraded(email, op(ctx, prov))
+}
+
+// trackDegraded passes the error through and records account-level
+// upstream trouble. A suspended consumer account answers WRITE calls
+// with an explicit error (ErrorAccountSuspend*) but READ listings
+// with plain success and zero items, so the read path cannot see the
+// suspension on its own. The recorded state makes IMAP answer NO with
+// the reason instead of silently showing empty folders; any
+// successful call clears it.
+func (r *Registry) trackDegraded(email string, err error) error {
+	if err == nil {
+		r.degMu.Lock()
+		delete(r.degraded, email)
+		r.degMu.Unlock()
+		return nil
+	}
+	if strings.Contains(err.Error(), "ErrorAccountSuspend") {
+		r.degMu.Lock()
+		if r.degraded == nil {
+			r.degraded = map[string]accountDegraded{}
+		}
+		r.degraded[email] = accountDegraded{at: r.cfg.Now()}
+		r.degMu.Unlock()
+	}
+	return err
+}
+
+// DegradedReason reports why the account is currently treated as
+// degraded, if the most recent suspension signal is fresh enough to
+// fail fast (older signals let the next call through as a probe).
+func (r *Registry) DegradedReason(email string) (string, bool) {
+	email = NormalizeEmail(email)
+	r.degMu.Lock()
+	defer r.degMu.Unlock()
+	d, ok := r.degraded[email]
+	if !ok || r.cfg.Now().Sub(d.at) > degradedProbeAfter {
+		return "", false
+	}
+	return "account suspended upstream: verify the account in Outlook on the web, then retry", true
 }

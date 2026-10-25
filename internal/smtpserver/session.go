@@ -236,6 +236,10 @@ func (s *Server) handleData(c net.Conn, r *bufio.Reader, sess *session) {
 	})
 	if err != nil {
 		s.logger.Warn().Err(err).Str("protocol", "smtp").Str("op", "send").Str("account", email).Int("size", len(mime)).Msg("smtp send failed upstream")
+		if reason, degraded := s.reg.DegradedReason(email); degraded {
+			writeLine(c, "451 4.3.0 "+reason)
+			return
+		}
 		writeLine(c, "451 4.3.0 Temporary failure, please try again later")
 		return
 	}

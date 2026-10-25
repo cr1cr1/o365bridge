@@ -215,6 +215,12 @@ func (ss *session) logAuth(user string, ok bool) {
 }
 
 func (ss *session) call(op func(context.Context, bridge.Provider) error) error {
+	// A suspended upstream answers reads with success and zero items;
+	// fail commands with the recorded reason instead of letting the
+	// client see silently empty folders.
+	if reason, degraded := ss.srv.reg.DegradedReason(ss.email); degraded {
+		return fmt.Errorf("bridge: %s", reason)
+	}
 	return ss.srv.reg.Call(context.Background(), ss.email, op)
 }
 
