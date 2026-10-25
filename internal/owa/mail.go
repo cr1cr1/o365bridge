@@ -189,6 +189,25 @@ func findItemReq(folderID string, offset, limit int, extra map[string]any) map[s
 	}()}
 }
 
+// isMailItem skips calendar, task, contact and similar rows: deleted
+// items of every type land in generic folders (trash), and only mail
+// items have a usable MIME form.
+func isMailItem(item map[string]any) bool {
+	t := str(item, "__type")
+	for _, prefix := range []string{"CalendarItem", "TaskItem", "ContactItem", "DistributionListItem"} {
+		if strings.HasPrefix(t, prefix) {
+			return false
+		}
+	}
+	class := str(item, "ItemClass")
+	for _, prefix := range []string{"IPM.Appointment", "IPM.Task", "IPM.Contact", "IPM.DistList", "IPM.Activity"} {
+		if strings.HasPrefix(class, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
 func findItems(ctx context.Context, p *provider, folderID string, offset, limit int, extra map[string]any) ([]map[string]any, int, error) {
 	res, err := p.call(ctx, "FindItem", findItemReq(folderID, offset, limit, extra))
 	if err != nil {
@@ -196,9 +215,11 @@ func findItems(ctx context.Context, p *provider, folderID string, offset, limit 
 	}
 	var items []map[string]any
 	for _, iv := range arr(res, "RootFolder", "Items") {
-		if m := asMap(iv); m != nil {
-			items = append(items, m)
+		m := asMap(iv)
+		if m == nil || !isMailItem(m) {
+			continue
 		}
+		items = append(items, m)
 	}
 	total := int(num(res, "RootFolder", "TotalItemsInView"))
 	if total == 0 {

@@ -196,6 +196,26 @@ func TestListMessages(t *testing.T) {
 	}
 }
 
+// Trash holds deleted calendar entries and tasks next to mail; the
+// mail listing must skip them (they render as empty messages).
+func TestListMessagesSkipsNonMailItems(t *testing.T) {
+	_, p := newFake(t, func(action string, body map[string]any) any {
+		return okBody(map[string]any{"RootFolder": map[string]any{"Items": []any{
+			msgItem(),
+			map[string]any{"__type": "CalendarItem:#Exchange", "ItemId": map[string]any{"Id": "cal1"}, "ItemClass": "IPM.Appointment"},
+			map[string]any{"__type": "TaskItem:#Exchange", "ItemId": map[string]any{"Id": "task1"}, "ItemClass": "IPM.Task"},
+			map[string]any{"ItemId": map[string]any{"Id": "post1"}, "ItemClass": "IPM.Post"},
+		}, "TotalItemsInView": float64(4)}})
+	})
+	msgs, _, err := p.ListMessages(context.Background(), "trash1", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 || msgs[0].ID != "m1" || msgs[1].ID != "post1" {
+		t.Fatalf("msgs %+v", msgs)
+	}
+}
+
 func TestGetMessageMIMEBase64(t *testing.T) {
 	raw := []byte("Subject: Hi\r\n\r\nbody\r\n")
 	_, p := newFake(t, func(action string, body map[string]any) any {
