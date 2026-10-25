@@ -512,6 +512,86 @@ func (c *client) login(tag string) {
 
 func joined(resp []string) string { return strings.Join(resp, "\n") }
 
+func startServerReg(t *testing.T) (*fakeProvider, *bridge.Registry, net.Listener) {
+	t.Helper()
+	prov := newFakeProvider()
+	reg, err := bridge.NewRegistry(bridge.Config{
+		StateDir: t.TempDir(),
+		Login:    fakeLogin{},
+		Factory:  fakeFactory{prov: prov},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := imapserver.New(reg, testPassword, zerolog.Nop())
+	srv.IdlePollInterval = 50 * time.Millisecond
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return prov, reg, ln
+}
+
+func (c *client) appendLiteral(tag, mailbox, raw string) string {
+	c.t.Helper()
+	if _, err := fmt.Fprintf(c.conn, "%s APPEND %s {%d}\r\n", tag, mailbox, len(raw)); err != nil {
+		c.t.Fatal(err)
+	}
+	if cont := c.readLine(); !strings.HasPrefix(cont, "+") {
+		c.t.Fatalf("expected continuation, got %q", cont)
+	}
+	if _, err := c.conn.Write([]byte(raw)); err != nil {
+		c.t.Fatal(err)
+	}
+	return joined(c.readUntil(tag))
+}
+
+func sentCopyRaw(mid string) string {
+	return "From: a@b\r\nMessage-ID: " + mid + "\r\nSubject: s\r\n\r\nbody\r\n"
+}
+
+// The upstream send already stores a Sent copy (SendAndSaveCopy), so a
+// client that also "places a copy in Sent" (the Thunderbird default)
+// must not create a second stored message. Deleting the visible copy
+// deletes the sent mail itself, as with Gmail.
+func TestAppendDedupesSentCopy(t *testing.T) {
+	prov, reg, ln := startServerReg(t)
+	c := dial(t, ln)
+	c.login("a")
+	reg.RecordSentCopy(testEmail, "<dup@example.com>")
+
+	resp := c.appendLiteral("b", `"Sent Items"`, sentCopyRaw("<dup@example.com>"))
+	if !strings.Contains(resp, "b OK") {
+		t.Fatalf("deduped APPEND: %s", resp)
+	}
+	if strings.Contains(resp, "APPENDUID") {
+		t.Fatalf("deduped APPEND must not report APPENDUID: %s", resp)
+	}
+	prov.mu.Lock()
+	appended := len(prov.appendedTo)
+	prov.mu.Unlock()
+	if appended != 0 {
+		t.Fatalf("upstream append called %d times, want 0", appended)
+	}
+
+	// Different Message-ID in Sent: a new message, stored normally.
+	if resp := c.appendLiteral("d", `"Sent Items"`, sentCopyRaw("<fresh@example.com>")); !strings.Contains(resp, "APPENDUID") {
+		t.Fatalf("fresh APPEND must report APPENDUID: %s", resp)
+	}
+	// Same recorded Message-ID, but not the Sent folder: stored normally.
+	if resp := c.appendLiteral("e", "INBOX", sentCopyRaw("<dup@example.com>")); !strings.Contains(resp, "APPENDUID") {
+		t.Fatalf("INBOX APPEND must report APPENDUID: %s", resp)
+	}
+	prov.mu.Lock()
+	appended = len(prov.appendedTo)
+	prov.mu.Unlock()
+	if appended != 2 {
+		t.Fatalf("upstream append called %d times, want 2", appended)
+	}
+}
+
 func sampleRaw(subject, body string) string {
 	return "From: Alice <alice@example.com>\r\nTo: user@example.com\r\nSubject: " + subject + "\r\nDate: Mon, 02 Jan 2006 15:04:05 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n"
 }

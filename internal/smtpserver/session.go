@@ -239,6 +239,12 @@ func (s *Server) handleData(c net.Conn, r *bufio.Reader, sess *session) {
 		writeLine(c, "451 4.3.0 Temporary failure, please try again later")
 		return
 	}
+	// The upstream send stores a Sent copy itself; remember the
+	// Message-ID so the IMAP APPEND of the client's own Sent copy can
+	// deduplicate instead of storing a second copy.
+	if mid := bridge.HeaderMessageID(mime); mid != "" {
+		s.reg.RecordSentCopy(email, mid)
+	}
 	id := queueID()
 	s.logger.Info().Str("protocol", "smtp").Str("op", "send").Str("account", email).Str("queue", id).Int("size", len(mime)).Int("rcpts", len(rcpts)).Str("from", from).Msg("smtp message accepted")
 	writeLine(c, fmt.Sprintf(queueFmt, id))

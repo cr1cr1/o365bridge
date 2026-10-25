@@ -1012,6 +1012,21 @@ func (ss *session) cmdAppend(tag, rest string, lits [][]byte) {
 		_ = ss.tagged(tag, "NO", sanitize(err.Error()))
 		return
 	}
+	// The upstream send already stored a Sent copy (SendAndSaveCopy /
+	// sendMail); a client that also "places a copy in Sent" (the
+	// Thunderbird default) would create a duplicate. Gmail-like
+	// semantics: the appended copy maps to the already-stored one.
+	if folder.Special == "sent" {
+		if mid := bridge.HeaderMessageID(raw); mid != "" && ss.srv.reg.SentCopyStored(ss.email, mid) {
+			ss.srv.logger.Info().Str("protocol", "imap").Str("op", "append").Str("account", ss.email).
+				Str("folder", name).Str("folder_id", folder.ID).Msg("imap append deduped sent copy")
+			_ = ss.tagged(tag, "OK", "APPEND completed (sent copy already stored)")
+			if ss.sel != nil && ss.sel.folder.ID == folder.ID {
+				_ = ss.refreshSelected()
+			}
+			return
+		}
+	}
 	var newID string
 	err = ss.call(func(ctx context.Context, p bridge.Provider) error {
 		id, err := p.AppendMessage(ctx, folder.ID, raw, flags)

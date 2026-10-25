@@ -29,6 +29,10 @@ type Registry struct {
 
 	mu       sync.Mutex
 	inflight map[string]*loginFlight
+
+	// Sent-copy dedupe state (see sentcopy.go).
+	sentMu sync.Mutex
+	sent   map[string]time.Time
 }
 
 type loginFlight struct {
