@@ -458,6 +458,7 @@ func startServerWithLogger(t *testing.T, logger zerolog.Logger) (*fakeProvider, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = logger
 	srv := imapserver.New(reg, testPassword, logger)
 	srv.IdlePollInterval = 50 * time.Millisecond
 	srv.SentDedupeRetryDelay = time.Millisecond
@@ -468,6 +469,30 @@ func startServerWithLogger(t *testing.T, logger zerolog.Logger) (*fakeProvider, 
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return prov, ln
+}
+
+// newServerOn starts a server on an explicit state dir, so a test can
+// restart the bridge over the same persisted state.
+func newServerOn(t *testing.T, dir string, prov *fakeProvider) net.Listener {
+	t.Helper()
+	reg, err := bridge.NewRegistry(bridge.Config{
+		StateDir: dir,
+		Login:    fakeLogin{},
+		Factory:  fakeFactory{prov: prov},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := imapserver.New(reg, testPassword, zerolog.Nop())
+	srv.IdlePollInterval = 50 * time.Millisecond
+	srv.SentDedupeRetryDelay = time.Millisecond
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return ln
 }
 
 type client struct {
@@ -1382,6 +1407,90 @@ func TestRenameMovesFolderIntoParent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("renamed folder missing: %+v", prov.folders)
+	}
+}
+
+// listLine returns the LIST/LSUB response line naming mailbox, or "".
+func listLine(lines []string, mailbox string) string {
+	for _, l := range lines {
+		if strings.HasSuffix(l, `"/" "`+mailbox+`"`) {
+			return l
+		}
+	}
+	return ""
+}
+
+// LSUB hides unsubscribed folders. An unsubscribed parent stays
+// visible as \Noselect while a subscribed child exists, so clients can
+// still render the tree. LIST always shows every folder.
+func TestLSUBHidesUnsubscribedFolders(t *testing.T) {
+	prov, ln := startServer(t)
+	prov.mu.Lock()
+	prov.folders = append(prov.folders,
+		bridge.Folder{ID: "work", Name: "Work"},
+		bridge.Folder{ID: "work26", Name: "2026", ParentID: "work"},
+	)
+	prov.mu.Unlock()
+	c := dial(t, ln)
+	c.login("a")
+
+	if r := c.cmd("a", "UNSUBSCRIBE Work"); !strings.Contains(joined(r), "a OK") {
+		t.Fatalf("UNSUBSCRIBE Work: %s", joined(r))
+	}
+	lsub := c.cmd("b", `LSUB "" "*"`)
+	if l := listLine(lsub, "Work/2026"); l == "" {
+		t.Fatalf("subscribed child hidden by parent unsubscribe: %s", joined(lsub))
+	}
+	if l := listLine(lsub, "Work"); l == "" || !strings.Contains(l, `\Noselect`) {
+		t.Fatalf("unsubscribed parent not kept as \\Noselect: %q", l)
+	}
+	if l := listLine(c.cmd("c", `LIST "" "*"`), "Work"); l == "" || strings.Contains(l, `\Noselect`) {
+		t.Fatalf("LIST must still show Work plainly: %q", l)
+	}
+
+	// Unsubscribe the child too: the whole branch leaves LSUB.
+	if r := c.cmd("d", `UNSUBSCRIBE "Work/2026"`); !strings.Contains(joined(r), "d OK") {
+		t.Fatalf("UNSUBSCRIBE child: %s", joined(r))
+	}
+	lsub = c.cmd("e", `LSUB "" "*"`)
+	if l := listLine(lsub, "Work"); l != "" {
+		t.Fatalf("branch parent still in LSUB: %q", l)
+	}
+	if l := listLine(lsub, "Work/2026"); l != "" {
+		t.Fatalf("unsubscribed child still in LSUB: %q", l)
+	}
+
+	// Re-subscribe: plain line again, child still hidden.
+	if r := c.cmd("f", "SUBSCRIBE Work"); !strings.Contains(joined(r), "f OK") {
+		t.Fatalf("SUBSCRIBE Work: %s", joined(r))
+	}
+	lsub = c.cmd("g", `LSUB "" "*"`)
+	if l := listLine(lsub, "Work"); l == "" || strings.Contains(l, `\Noselect`) {
+		t.Fatalf("re-subscribed Work wrong: %q", l)
+	}
+	if l := listLine(lsub, "Work/2026"); l != "" {
+		t.Fatalf("child leaked back into LSUB: %q", l)
+	}
+}
+
+// The unsubscribed set lives in idmap.json and survives a restart.
+func TestSubscriptionPersistsAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	prov := newFakeProvider()
+	c := dial(t, newServerOn(t, dir, prov))
+	c.login("a")
+	if r := c.cmd("a", "UNSUBSCRIBE Archive"); !strings.Contains(joined(r), "a OK") {
+		t.Fatalf("UNSUBSCRIBE Archive: %s", joined(r))
+	}
+
+	// Fresh server on the same state dir, as after a process restart.
+	c2 := dial(t, newServerOn(t, dir, prov))
+	c2.login("a")
+	if l := listLine(c2.cmd("b", `LSUB "" "*"`), "Archive"); l != "" {
+		t.Fatalf("Archive still in LSUB after restart: %q", l)
+	}
+	if l := listLine(c2.cmd("c", `LIST "" "*"`), "Archive"); l == "" {
+		t.Fatal("LIST lost Archive after restart")
 	}
 }
 

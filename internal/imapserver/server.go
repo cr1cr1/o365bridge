@@ -494,8 +494,10 @@ func (ss *session) dispatch(line string, lits [][]byte) bool {
 			ss.cmdDelete(tag, rest, lits)
 		case "RENAME":
 			ss.cmdRename(tag, rest, lits)
-		case "SUBSCRIBE", "UNSUBSCRIBE":
-			_ = ss.tagged(tag, "OK", cmdUpper+" completed")
+		case "SUBSCRIBE":
+			ss.cmdSubscribe(tag, cmdUpper, rest, lits, true)
+		case "UNSUBSCRIBE":
+			ss.cmdSubscribe(tag, cmdUpper, rest, lits, false)
 		case "APPEND":
 			ss.cmdAppend(tag, rest, lits)
 		case "CHECK":
@@ -719,8 +721,34 @@ func (ss *session) cmdList(tag, cmd, rest string, lits [][]byte) {
 		items = append(items, item{f, d})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].display < items[j].display })
+	// LSUB hides unsubscribed folders. Unsubscribed ancestors of a
+	// subscribed folder stay visible as \Noselect so clients can
+	// still render the tree path.
+	var hidden, keep map[string]bool
+	if cmd == "LSUB" && ss.idmap != nil {
+		hidden = map[string]bool{}
+		parentOf := map[string]string{}
+		for _, f := range folders {
+			parentOf[f.ID] = f.ParentID
+			if !ss.idmap.Subscribed(f.ID) {
+				hidden[f.ID] = true
+			}
+		}
+		keep = map[string]bool{}
+		for _, it := range items {
+			if hidden[it.folder.ID] {
+				continue
+			}
+			for pid := it.folder.ParentID; pid != "" && !keep[pid]; pid = parentOf[pid] {
+				keep[pid] = true
+			}
+		}
+	}
 	for _, it := range items {
 		if !imapMatch(pattern, it.display) {
+			continue
+		}
+		if hidden != nil && hidden[it.folder.ID] && !keep[it.folder.ID] {
 			continue
 		}
 		hasChild := false
@@ -730,6 +758,9 @@ func (ss *session) cmdList(tag, cmd, rest string, lits [][]byte) {
 			}
 		}
 		attrs := []string{}
+		if hidden != nil && hidden[it.folder.ID] {
+			attrs = append(attrs, "\\Noselect")
+		}
 		switch it.folder.Special {
 		case "inbox":
 			attrs = append(attrs, "\\Inbox")
@@ -935,6 +966,25 @@ func (ss *session) cmdCreate(tag, rest string, lits [][]byte) {
 		return
 	}
 	_ = ss.tagged(tag, "OK", "CREATE completed")
+}
+
+func (ss *session) cmdSubscribe(tag, cmd, rest string, lits [][]byte, sub bool) {
+	p := &parser{s: rest, lits: lits}
+	name, err := p.astring()
+	if err != nil {
+		_ = ss.tagged(tag, "BAD", cmd+" requires mailbox")
+		return
+	}
+	folder, _, err := ss.resolveFolder(name)
+	if err != nil {
+		_ = ss.failNO(tag, err)
+		return
+	}
+	if err := ss.idmap.SetSubscribed(folder.ID, sub); err != nil {
+		_ = ss.no(tag, err)
+		return
+	}
+	_ = ss.tagged(tag, "OK", cmd+" completed")
 }
 
 func (ss *session) cmdDelete(tag, rest string, lits [][]byte) {

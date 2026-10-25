@@ -132,13 +132,15 @@ type IDMap struct {
 	path     string
 	Validity map[string]uint32            `json:"validity"`
 	Next     map[string]uint32            `json:"next"`
-	ByFolder map[string]map[string]uint32 `json:"by_folder"` // folder -> upstream id -> uid
+	ByFolder map[string]map[string]uint32 `json:"by_folder"`    // folder -> upstream id -> uid
+	Unsub    map[string]bool              `json:"unsubscribed"` // folder id -> hidden from LSUB
 }
 
 type idMapFile struct {
 	Validity map[string]uint32            `json:"validity"`
 	Next     map[string]uint32            `json:"next"`
 	ByFolder map[string]map[string]uint32 `json:"by_folder"`
+	Unsub    map[string]bool              `json:"unsubscribed"`
 }
 
 func (s *Store) loadIDMap(email string) (*IDMap, error) {
@@ -151,6 +153,7 @@ func (s *Store) loadIDMap(email string) (*IDMap, error) {
 		Validity: map[string]uint32{},
 		Next:     map[string]uint32{},
 		ByFolder: map[string]map[string]uint32{},
+		Unsub:    map[string]bool{},
 	}
 	data, err := os.ReadFile(m.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -171,6 +174,9 @@ func (s *Store) loadIDMap(email string) (*IDMap, error) {
 	}
 	if f.ByFolder != nil {
 		m.ByFolder = f.ByFolder
+	}
+	if f.Unsub != nil {
+		m.Unsub = f.Unsub
 	}
 	return m, nil
 }
@@ -195,7 +201,7 @@ func (s *Store) IDMap(email string) (*IDMap, error) {
 }
 
 func (m *IDMap) saveLocked() error {
-	data, err := json.Marshal(idMapFile{Validity: m.Validity, Next: m.Next, ByFolder: m.ByFolder})
+	data, err := json.Marshal(idMapFile{Validity: m.Validity, Next: m.Next, ByFolder: m.ByFolder, Unsub: m.Unsub})
 	if err != nil {
 		return err
 	}
@@ -262,5 +268,28 @@ func (m *IDMap) Forget(folderID string) error {
 	defer m.mu.Unlock()
 	delete(m.ByFolder, folderID)
 	delete(m.Next, folderID)
+	delete(m.Unsub, folderID)
+	return m.saveLocked()
+}
+
+// Subscribed reports whether the folder shows in LSUB. Default: yes.
+func (m *IDMap) Subscribed(folderID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.Unsub[folderID]
+}
+
+// SetSubscribed records and persists the folder's LSUB visibility.
+func (m *IDMap) SetSubscribed(folderID string, subscribed bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if subscribed == !m.Unsub[folderID] {
+		return nil // no change, skip the disk write
+	}
+	if subscribed {
+		delete(m.Unsub, folderID)
+	} else {
+		m.Unsub[folderID] = true
+	}
 	return m.saveLocked()
 }
