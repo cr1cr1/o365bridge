@@ -58,6 +58,7 @@ type fakeProvider struct {
 	appendedTo   []string
 	createdName  []string
 	failListMsgs bool
+	failMoveMsgs bool
 }
 
 func newFakeProvider() *fakeProvider {
@@ -66,6 +67,7 @@ func newFakeProvider() *fakeProvider {
 			{ID: "inbox", Name: "INBOX", Special: "inbox"},
 			{ID: "sent", Name: "Sent Items", Special: "sent"},
 			{ID: "archive", Name: "Archive", Special: "archive"},
+			{ID: "trash", Name: "Deleted Items", Special: "trash"},
 		},
 		msgs: map[string][]*fakeMsg{},
 	}
@@ -226,6 +228,9 @@ func (p *fakeProvider) SetFlags(_ context.Context, folderID string, ids []string
 func (p *fakeProvider) MoveMessages(_ context.Context, folderID string, ids []string, dest string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.failMoveMsgs {
+		return fmt.Errorf("fake: move disabled")
+	}
 	p.movedTo = append(p.movedTo, dest)
 	p.movedIDs = append(p.movedIDs, ids...)
 	var remain []*fakeMsg
@@ -1097,18 +1102,52 @@ func TestIdleEmitsExists(t *testing.T) {
 	}
 }
 
-func TestExpungeAfterStoreDeleted(t *testing.T) {
+// A \Deleted mark acts at once: the message moves to the account's
+// trash folder upstream and leaves the selected view with an untagged
+// EXPUNGE. Clients that only mark, without a following EXPUNGE, still
+// get a working delete.
+func TestStoreDeletedMovesToTrashImmediately(t *testing.T) {
 	prov, ln := startServer(t)
 	id := prov.addMessage("inbox", sampleRaw("DeleteMe", "x"), nil, time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC))
 	prov.addMessage("inbox", sampleRaw("KeepMe", "x"), nil, time.Date(2006, 1, 3, 15, 4, 5, 0, time.UTC))
 	c := dial(t, ln)
 	c.login("a")
 	c.cmd("b", "SELECT INBOX")
-	c.cmd("c", `STORE 1 +FLAGS (\Deleted)`)
-	exp := c.cmd("d", "EXPUNGE")
-	j := joined(exp)
-	if !strings.Contains(j, "EXPUNGE") || !strings.Contains(j, "d OK") {
-		t.Fatalf("EXPUNGE: %s", j)
+	store := c.cmd("c", `STORE 1 +FLAGS (\Deleted)`)
+	j := joined(store)
+	if !strings.Contains(j, "c OK") {
+		t.Fatalf("STORE: %s", j)
+	}
+	if !strings.Contains(j, "EXPUNGE") {
+		t.Fatalf("marking \\Deleted must emit EXPUNGE after the move: %s", j)
+	}
+	prov.mu.Lock()
+	movedTo := append([]string(nil), prov.movedTo...)
+	inboxLen := len(prov.msgs["inbox"])
+	trashLen := len(prov.msgs["trash"])
+	prov.mu.Unlock()
+	if len(movedTo) != 1 || movedTo[0] != "trash" {
+		t.Fatalf("movedTo = %v, want [trash]", movedTo)
+	}
+	if inboxLen != 1 {
+		t.Fatalf("inbox len after mark = %d, want 1", inboxLen)
+	}
+	if trashLen != 1 {
+		t.Fatalf("trash len after mark = %d, want 1", trashLen)
+	}
+	// The permanent step: mark inside the trash, then EXPUNGE removes
+	// for good (provider DeleteMessages, no further move).
+	c.cmd("d", "SELECT \"Deleted Items\"")
+	c.cmd("e", `STORE 1 +FLAGS (\Deleted)`)
+	prov.mu.Lock()
+	moves := len(prov.movedTo)
+	prov.mu.Unlock()
+	if moves != 1 {
+		t.Fatalf("marking inside trash must not move again: %d moves", moves)
+	}
+	exp := c.cmd("f", "EXPUNGE")
+	if !strings.Contains(joined(exp), "f OK") {
+		t.Fatalf("EXPUNGE: %s", joined(exp))
 	}
 	prov.mu.Lock()
 	defer prov.mu.Unlock()
@@ -1123,9 +1162,48 @@ func TestExpungeAfterStoreDeleted(t *testing.T) {
 	if !found {
 		t.Fatalf("provider DeleteMessages not called with %s: %v", id, prov.deleted)
 	}
-	// folder now has 1 message upstream
-	if len(prov.msgs["inbox"]) != 1 {
-		t.Fatalf("inbox len after expunge = %d", len(prov.msgs["inbox"]))
+	if len(prov.msgs["trash"]) != 0 {
+		t.Fatalf("trash len after expunge = %d, want 0", len(prov.msgs["trash"]))
+	}
+}
+
+// When the upstream move fails, the mark stays session-local and the
+// following EXPUNGE still removes the message permanently.
+func TestExpungeRemovesWhenTrashMoveFails(t *testing.T) {
+	prov, ln := startServer(t)
+	id := prov.addMessage("inbox", sampleRaw("DeleteMe", "x"), nil, time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC))
+	c := dial(t, ln)
+	c.login("a")
+	c.cmd("b", "SELECT INBOX")
+	prov.mu.Lock()
+	prov.failMoveMsgs = true
+	prov.mu.Unlock()
+	store := c.cmd("c", `STORE 1 +FLAGS (\Deleted)`)
+	if !strings.Contains(joined(store), "c OK") {
+		t.Fatalf("STORE: %s", joined(store))
+	}
+	prov.mu.Lock()
+	prov.failMoveMsgs = false
+	prov.mu.Unlock()
+	exp := c.cmd("d", "EXPUNGE")
+	if !strings.Contains(joined(exp), "d OK") {
+		t.Fatalf("EXPUNGE: %s", joined(exp))
+	}
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	found := false
+	for _, del := range prov.deleted {
+		for _, d := range del {
+			if d == id {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("provider DeleteMessages not called with %s: %v", id, prov.deleted)
+	}
+	if len(prov.msgs["inbox"]) != 0 {
+		t.Fatalf("inbox len after expunge = %d, want 0", len(prov.msgs["inbox"]))
 	}
 }
 

@@ -140,7 +140,72 @@ func (ss *session) cmdStore(tag, rest string, lits [][]byte, uidMode bool) {
 			}
 		}
 	}
+	ss.moveDeletedNow(idxs)
 	_ = ss.tagged(tag, "OK", "STORE completed")
+}
+
+// moveDeletedNow makes a \Deleted mark act at once: every newly marked
+// message moves to the account's trash folder upstream, then leaves
+// the selected view with untagged EXPUNGE responses (descending, so
+// sequence numbers stay valid). Clients that only mark — without a
+// following EXPUNGE — still get a working delete. Inside the trash
+// itself the mark stays session-local so a following EXPUNGE removes
+// the message permanently. If the upstream move fails, the mark stays
+// session-local and the next EXPUNGE retries the removal.
+func (ss *session) moveDeletedNow(idxs []int) {
+	if ss.sel == nil || ss.sel.folder.Special == "trash" {
+		return
+	}
+	var moveIdxs []int
+	var ids []string
+	for _, i := range idxs {
+		if i < len(ss.sel.msgs) && hasBridgeFlag([]string(ss.sel.msgs[i].meta.Flags), "\\deleted") {
+			moveIdxs = append(moveIdxs, i)
+			ids = append(ids, ss.sel.msgs[i].meta.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	folders, err := ss.listFolders()
+	if err != nil {
+		ss.srv.logger.Warn().Err(err).Str("protocol", "imap").Str("op", "store").
+			Str("account", ss.email).Msg("trash lookup failed, keeping \\Deleted session-local")
+		return
+	}
+	trashID := ""
+	for _, f := range folders {
+		if f.Special == "trash" {
+			trashID = f.ID
+			break
+		}
+	}
+	if trashID == "" {
+		return
+	}
+	src := ss.sel.folder.ID
+	if err := ss.call(func(ctx context.Context, p bridge.Provider) error {
+		return p.MoveMessages(ctx, src, ids, trashID)
+	}); err != nil {
+		ss.srv.logger.Warn().Err(err).Str("protocol", "imap").Str("op", "store").
+			Str("account", ss.email).Msg("\\Deleted move failed, keeping mark session-local")
+		return
+	}
+	for k := len(moveIdxs) - 1; k >= 0; k-- {
+		_ = ss.printf("* %d EXPUNGE", moveIdxs[k]+1)
+	}
+	removed := map[int]bool{}
+	for _, i := range moveIdxs {
+		removed[i] = true
+		delete(ss.deleted, ss.sel.msgs[i].uid)
+	}
+	var kept []entry
+	for i, e := range ss.sel.msgs {
+		if !removed[i] {
+			kept = append(kept, e)
+		}
+	}
+	ss.sel.msgs = kept
 }
 
 func (ss *session) cmdCopyMove(tag, rest string, lits [][]byte, uidMode bool, move bool) {

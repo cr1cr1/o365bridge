@@ -361,24 +361,12 @@ func (p *provider) CopyMessages(ctx context.Context, folderID string, ids []stri
 }
 
 func (p *provider) DeleteMessages(ctx context.Context, folderID string, ids []string) error {
-	deleteType := "MoveToDeletedItems"
-	isTrash := distinguished[strings.ToLower(folderID)] && strings.ToLower(folderID) == "deleteditems"
-	if !isTrash {
-		if folders, err := p.ListFolders(ctx); err == nil {
-			for _, f := range folders {
-				if f.ID == folderID && f.Special == "trash" {
-					isTrash = true
-				}
-			}
-		}
-	}
-	if isTrash {
-		// NOTE: _o uses SoftDelete for permanent deletes; the bridge
-		// contract for already-in-trash requires HardDelete.
-		deleteType = "HardDelete"
-	}
+	// EXPUNGE semantics: remove permanently. Marking \Deleted already
+	// moved the message to Deleted Items (imapserver moveDeletedNow);
+	// this path removes messages marked inside the trash itself or
+	// left behind when that move failed.
 	req := envelope("DeleteItemJsonRequest:#Exchange", "DeleteItemRequest:#Exchange", map[string]any{
-		"ItemIds": itemIDs(ids), "DeleteType": deleteType, "ReturnMovedItemIds": false, "SuppressReadRecipts": true,
+		"ItemIds": itemIDs(ids), "DeleteType": "HardDelete", "ReturnMovedItemIds": false, "SuppressReadRecipts": true,
 	})
 	_, err := p.call(ctx, "DeleteItem", req)
 	return err
