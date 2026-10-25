@@ -11,8 +11,10 @@ upstream.
 Fix: marking `\Deleted` now acts immediately and is not
 Thunderbird-specific. Outside the trash, the marked messages move to
 the account's Deleted Items folder upstream; inside any folder marked
-as trash, the marked messages are removed permanently upstream (OWA
-`HardDelete`). In both cases the messages then leave the selected view
+as trash or drafts, the marked messages are removed permanently
+upstream (OWA `HardDelete`) — deleted mail would only move in a
+circle, and a discarded draft is a working copy whose removal send
+flows rely on. In both cases the messages then leave the selected view
 with untagged EXPUNGE responses. EXPUNGE also removes permanently. If
 the upstream call fails, the mark stays session-local and the next
 EXPUNGE retries the removal.

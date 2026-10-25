@@ -32,6 +32,11 @@ type Server struct {
 	// IdlePollInterval is the IDLE/NOOP poll period. Default 10s.
 	IdlePollInterval time.Duration
 
+	// SentDedupeRetryDelay spaces the Sent-copy dedupe lookup retries.
+	// Clients append milliseconds after the send, while the upstream
+	// listing can lag briefly. Default 400ms.
+	SentDedupeRetryDelay time.Duration
+
 	reg      *bridge.Registry
 	password string
 	logger   zerolog.Logger
@@ -47,9 +52,10 @@ type Server struct {
 func New(reg *bridge.Registry, instancePassword string, logger zerolog.Logger) *Server {
 	return &Server{
 		reg: reg, password: instancePassword, logger: logger,
-		IdlePollInterval: 10 * time.Second,
-		conns:            map[net.Conn]struct{}{},
-		idmaps:           map[string]*bridge.IDMap{},
+		IdlePollInterval:     10 * time.Second,
+		SentDedupeRetryDelay: 400 * time.Millisecond,
+		conns:                map[net.Conn]struct{}{},
+		idmaps:               map[string]*bridge.IDMap{},
 	}
 }
 
@@ -1018,27 +1024,35 @@ func (ss *session) cmdAppend(tag, rest string, lits [][]byte) {
 	// appended Message-ID against the newest page of the folder — the
 	// send copy is the newest item — and skip storing when it is
 	// already there. Gmail-like semantics: deleting the visible copy
-	// deletes the sent mail itself.
+	// deletes the sent mail itself. Clients append within milliseconds
+	// of the send, while the upstream listing may lag or hiccup, so
+	// the lookup retries briefly before giving up and storing.
 	if folder.Special == "sent" {
 		if mid := bridge.HeaderMessageID(raw); mid != "" {
 			found := false
-			err := ss.call(func(ctx context.Context, p bridge.Provider) error {
-				metas, _, err := p.ListMessages(ctx, folder.ID, 0, 50)
-				if err != nil {
-					return err
+			var checkErr error
+			for attempt := 0; attempt < 3 && !found; attempt++ {
+				if attempt > 0 {
+					time.Sleep(ss.srv.SentDedupeRetryDelay)
 				}
-				for _, m := range metas {
-					if m.MessageID == mid {
-						found = true
-						break
+				checkErr = ss.call(func(ctx context.Context, p bridge.Provider) error {
+					metas, _, err := p.ListMessages(ctx, folder.ID, 0, 50)
+					if err != nil {
+						return err
 					}
-				}
-				return nil
-			})
-			if err != nil {
+					for _, m := range metas {
+						if m.MessageID == mid {
+							found = true
+							break
+						}
+					}
+					return nil
+				})
+			}
+			if checkErr != nil {
 				// The check is best-effort: when the folder cannot be
 				// listed, store the copy as before rather than fail.
-				ss.srv.logger.Warn().Err(err).Str("protocol", "imap").Str("op", "append").
+				ss.srv.logger.Warn().Err(checkErr).Str("protocol", "imap").Str("op", "append").
 					Str("account", ss.email).Str("folder", name).Msg("sent copy check failed, storing append normally")
 			} else if found {
 				ss.srv.logger.Info().Str("protocol", "imap").Str("op", "append").Str("account", ss.email).

@@ -147,12 +147,13 @@ func (ss *session) cmdStore(tag, rest string, lits [][]byte, uidMode bool) {
 // deleteMarkedNow makes a \Deleted mark act at once, so clients that
 // only mark — without a following EXPUNGE — still get a working
 // delete. Outside the trash: the marked messages move to the account's
-// trash folder upstream. Inside any folder marked as trash: the marked
-// messages are removed permanently upstream. In both cases the
-// messages then leave the selected view with untagged EXPUNGE
-// responses (descending, so sequence numbers stay valid). If the
-// upstream call fails, the mark stays session-local and the next
-// EXPUNGE retries the removal.
+// trash folder upstream. Inside any folder marked as trash or drafts:
+// the marked messages are removed permanently upstream (deleted mail
+// would only move in a circle; a discarded draft is a working copy,
+// and send flows rely on its removal). In both cases the messages then
+// leave the selected view with untagged EXPUNGE responses (descending,
+// so sequence numbers stay valid). If the upstream call fails, the
+// mark stays session-local and the next EXPUNGE retries the removal.
 func (ss *session) deleteMarkedNow(idxs []int) {
 	if ss.sel == nil {
 		return
@@ -169,7 +170,7 @@ func (ss *session) deleteMarkedNow(idxs []int) {
 		return
 	}
 	src := ss.sel.folder.ID
-	inTrash := ss.sel.folder.Special == "trash"
+	inTrash := ss.sel.folder.Special == "trash" || ss.sel.folder.Special == "drafts"
 	var err error
 	if inTrash {
 		err = ss.call(func(ctx context.Context, p bridge.Provider) error {

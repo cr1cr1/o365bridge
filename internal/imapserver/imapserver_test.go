@@ -45,20 +45,21 @@ type flagsCall struct {
 }
 
 type fakeProvider struct {
-	mu           sync.Mutex
-	folders      []bridge.Folder
-	msgs         map[string][]*fakeMsg
-	nextID       int
-	setFlags     []flagsCall
-	deleted      [][]string
-	copiedTo     []string
-	copiedIDs    []string
-	movedTo      []string
-	movedIDs     []string
-	appendedTo   []string
-	createdName  []string
-	failListMsgs bool
-	failMoveMsgs bool
+	mu             sync.Mutex
+	folders        []bridge.Folder
+	msgs           map[string][]*fakeMsg
+	nextID         int
+	setFlags       []flagsCall
+	deleted        [][]string
+	copiedTo       []string
+	copiedIDs      []string
+	movedTo        []string
+	movedIDs       []string
+	appendedTo     []string
+	createdName    []string
+	failListMsgs   bool
+	failMoveMsgs   bool
+	listMissesLeft int // simulate listing lag: hide results this many calls
 }
 
 func newFakeProvider() *fakeProvider {
@@ -66,6 +67,7 @@ func newFakeProvider() *fakeProvider {
 		folders: []bridge.Folder{
 			{ID: "inbox", Name: "INBOX", Special: "inbox"},
 			{ID: "sent", Name: "Sent Items", Special: "sent"},
+			{ID: "drafts", Name: "Drafts", Special: "drafts"},
 			{ID: "archive", Name: "Archive", Special: "archive"},
 			{ID: "trash", Name: "Deleted Items", Special: "trash"},
 		},
@@ -118,6 +120,10 @@ func (p *fakeProvider) ListMessages(_ context.Context, folderID string, offset, 
 	defer p.mu.Unlock()
 	if p.failListMsgs {
 		return nil, 0, fmt.Errorf("fake: listing disabled")
+	}
+	if p.listMissesLeft > 0 && folderID == "sent" {
+		p.listMissesLeft--
+		return []bridge.MessageMeta{}, 0, nil
 	}
 	all := p.msgs[folderID]
 	total := len(all)
@@ -410,6 +416,7 @@ func startMultiServer(t *testing.T, provs map[string]*fakeProvider) net.Listener
 	}
 	srv := imapserver.New(reg, testPassword, zerolog.Nop())
 	srv.IdlePollInterval = 50 * time.Millisecond
+	srv.SentDedupeRetryDelay = time.Millisecond
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -442,6 +449,7 @@ func startServerWithLogger(t *testing.T, logger zerolog.Logger) (*fakeProvider, 
 	}
 	srv := imapserver.New(reg, testPassword, logger)
 	srv.IdlePollInterval = 50 * time.Millisecond
+	srv.SentDedupeRetryDelay = time.Millisecond
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -603,6 +611,65 @@ func TestAppendStoresSentCopyWhenLookupFails(t *testing.T) {
 	}
 	if n := appendedCount(prov); n != 2 {
 		t.Fatalf("upstream append called %d times, want 2", n)
+	}
+}
+
+// Clients append their Sent copy milliseconds after the send, while
+// the upstream listing may lag: the dedupe lookup retries briefly and
+// still matches the copy the send stored.
+func TestAppendDedupesAfterListingLag(t *testing.T) {
+	prov, ln := startServer(t)
+	c := dial(t, ln)
+	c.login("a")
+	// Seed the sent copy as the send would have stored it, and hide it
+	// from the first listing.
+	prov.addMessage("sent", sentCopyRaw("<lag@1>"), bridge.Flags{`\seen`}, time.Now())
+	prov.mu.Lock()
+	prov.listMissesLeft = 1
+	prov.mu.Unlock()
+	resp := c.appendLiteral("b", `"Sent Items"`, sentCopyRaw("<lag@1>"))
+	if !strings.Contains(resp, "b OK") {
+		t.Fatalf("lagged APPEND: %s", resp)
+	}
+	if strings.Contains(resp, "APPENDUID") {
+		t.Fatalf("deduped APPEND must not report APPENDUID: %s", resp)
+	}
+	if n := appendedCount(prov); n != 0 {
+		t.Fatalf("upstream append called %d times, want 0", n)
+	}
+}
+
+// Marking \Deleted in the Drafts folder removes the draft permanently:
+// a send flow discards its working copy, and moving it to trash would
+// leave a stray copy behind.
+func TestStoreDeletedInDraftsRemovesPermanently(t *testing.T) {
+	prov, ln := startServer(t)
+	id := prov.addMessage("drafts", sentCopyRaw("<draft@1>"), nil, time.Now())
+	c := dial(t, ln)
+	c.login("a")
+	c.cmd("b", "SELECT Drafts")
+	store := c.cmd("c", `STORE 1 +FLAGS (\Deleted)`)
+	if !strings.Contains(joined(store), "EXPUNGE") {
+		t.Fatalf("marking in drafts must emit EXPUNGE after the delete: %s", joined(store))
+	}
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	if len(prov.movedTo) != 0 {
+		t.Fatalf("marking in drafts must not move to trash: %v", prov.movedTo)
+	}
+	found := false
+	for _, del := range prov.deleted {
+		for _, d := range del {
+			if d == id {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("provider DeleteMessages not called with %s: %v", id, prov.deleted)
+	}
+	if len(prov.msgs["drafts"]) != 0 {
+		t.Fatalf("drafts len after mark = %d, want 0", len(prov.msgs["drafts"]))
 	}
 }
 

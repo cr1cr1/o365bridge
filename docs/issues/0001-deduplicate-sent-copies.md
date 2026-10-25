@@ -12,7 +12,10 @@ Fix: message listings now request the Message-ID (OWA
 `internetMessageId` select). An IMAP APPEND to the account's Sent
 folder compares the appended Message-ID against the newest page of the
 folder, where the send's copy is the newest item, and answers OK
-without storing when it is already there. Stateless: no map, no
-timeout; it works across restarts and at any later time. When the
-folder listing fails, the copy is stored as before. Deleting the
-visible copy deletes the sent mail itself, as with Gmail.
+without storing when it is already there. Clients append within
+milliseconds of the send while the upstream listing can lag or
+hiccup, so the lookup retries briefly (three attempts, 400 ms apart)
+before falling back to storing. Stateless: no map, no timeout; it
+works across restarts and at any later time. When the folder cannot
+be listed, the copy is stored as before. Deleting the visible copy
+deletes the sent mail itself, as with Gmail.
