@@ -1116,26 +1116,11 @@ func (ss *session) cmdAppend(tag, rest string, lits [][]byte) {
 	// the lookup retries briefly before giving up and storing.
 	if folder.Special == "sent" {
 		if mid := bridge.HeaderMessageID(raw); mid != "" {
-			found := false
-			var checkErr error
-			for attempt := 0; attempt < 3 && !found; attempt++ {
-				if attempt > 0 {
-					time.Sleep(ss.srv.SentDedupeRetryDelay)
-				}
-				checkErr = ss.call(func(ctx context.Context, p bridge.Provider) error {
-					metas, _, err := p.ListMessages(ctx, folder.ID, 0, 50)
-					if err != nil {
-						return err
-					}
-					for _, m := range metas {
-						if m.MessageID == mid {
-							found = true
-							break
-						}
-					}
-					return nil
-				})
-			}
+			found, checkErr := false, error(nil)
+			_ = ss.call(func(ctx context.Context, p bridge.Provider) error {
+				found, checkErr = bridge.FolderHasMessageID(ctx, p, folder.ID, mid, ss.srv.SentDedupeRetryDelay)
+				return nil
+			})
 			if checkErr != nil {
 				// The check is best-effort: when the folder cannot be
 				// listed, store the copy as before rather than fail.

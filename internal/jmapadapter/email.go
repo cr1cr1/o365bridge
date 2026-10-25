@@ -19,6 +19,10 @@ import (
 	"github.com/cr1cr1/o365bridge/internal/bridge"
 )
 
+// SentDedupeRetryDelay spaces the listing retries in the Sent dedupe
+// check; tests shrink it.
+var SentDedupeRetryDelay = 400 * time.Millisecond
+
 type emailStore struct{ b *Backend }
 
 func (s *emailStore) State(_ context.Context, account jmap.ID) (string, error) {
@@ -417,6 +421,33 @@ func (s *emailStore) Create(ctx context.Context, account jmap.ID, obj jmail.Emai
 	return em, nil
 }
 
+// sentAlreadyHas reports whether dest is a Sent-equivalent mailbox
+// that already holds this Message-ID (best-effort: errors count as no).
+func (s *emailStore) sentAlreadyHas(ctx context.Context, account jmap.ID, dest, messageID string) bool {
+	sent := false
+	if err := s.b.call(ctx, string(account), "ListFolders", func(ctx context.Context, p bridge.Provider) error {
+		folders, err := p.ListFolders(ctx)
+		if err != nil {
+			return err
+		}
+		for _, f := range folders {
+			if f.ID == dest && f.Special == "sent" {
+				sent = true
+			}
+		}
+		return nil
+	}); err != nil || !sent {
+		return false
+	}
+	found := false
+	_ = s.b.call(ctx, string(account), "ListMessages", func(ctx context.Context, p bridge.Provider) error {
+		var err error
+		found, err = bridge.FolderHasMessageID(ctx, p, dest, messageID, SentDedupeRetryDelay)
+		return err
+	})
+	return found
+}
+
 func (s *emailStore) Update(ctx context.Context, account jmap.ID, obj jmail.Email) (*jmail.Email, *jmap.SetError) {
 	folderID, upstreamID, err := decodeEmailID(obj.ID)
 	if err != nil {
@@ -490,6 +521,18 @@ func (s *emailStore) Update(ctx context.Context, account jmap.ID, obj jmail.Emai
 	// the caller learns the new id on the next get/query.
 	isMove := len(removed) == 1 && len(added) == 1 && len(curFolders) == 1 && curFolders[0] == removed[0]
 	if isMove {
+		// The upstream send already stored the Sent copy
+		// (SendAndSaveCopy); a client that also moves the message
+		// into Sent would duplicate it. Same stateless rule as IMAP
+		// APPEND: match by Message-ID, drop the source copy.
+		if len(cur.MessageID) > 0 && s.sentAlreadyHas(ctx, account, string(added[0]), cur.MessageID[0]) {
+			if err := s.b.call(ctx, string(account), "DeleteMessages", func(ctx context.Context, p bridge.Provider) error {
+				return p.DeleteMessages(ctx, folderID, []string{upstreamID})
+			}); err != nil {
+				return nil, &jmap.SetError{Type: "serverFail", Description: err.Error()}
+			}
+			return nil, nil
+		}
 		if err := s.b.call(ctx, string(account), "MoveMessages", func(ctx context.Context, p bridge.Provider) error {
 			return p.MoveMessages(ctx, string(removed[0]), []string{upstreamID}, string(added[0]))
 		}); err != nil {

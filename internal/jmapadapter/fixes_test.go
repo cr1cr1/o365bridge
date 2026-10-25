@@ -2,9 +2,11 @@ package jmapadapter_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -211,6 +213,63 @@ func TestEmailSetMoveUsesMoveMessages(t *testing.T) {
 	}
 	if len(tp.msgs["inbox"]) != 0 || len(tp.msgs["archive"]) != 1 {
 		t.Fatalf("folders: inbox=%d archive=%d", len(tp.msgs["inbox"]), len(tp.msgs["archive"]))
+	}
+}
+
+// Fix 5: moving an email into Sent does not duplicate when the send
+// already stored its copy (same stateless rule as IMAP APPEND).
+func TestEmailSetMoveIntoSentDedupes(t *testing.T) {
+	jmapadapter.SentDedupeRetryDelay = time.Millisecond
+	tp := newTrackProvider()
+	upID := tp.seed("drafts", "Send Me", "body", nil)
+	// The SendAndSaveCopy copy upstream: same Message-ID, in Sent.
+	tp.mu.Lock()
+	tp.fakeProvider.mu.Lock()
+	raw := tp.msgs["drafts"][upID].raw
+	meta := metaFromRaw("sent", "sentcopy", raw, nil)
+	if tp.msgs["sent"] == nil {
+		tp.msgs["sent"] = map[string]*fakeMsg{}
+	}
+	tp.msgs["sent"]["sentcopy"] = &fakeMsg{meta: meta, raw: raw}
+	tp.order["sent"] = append(tp.order["sent"], "sentcopy")
+	tp.fakeProvider.mu.Unlock()
+	tp.mu.Unlock()
+
+	h := setupFix(t, tp)
+	acct := "a@example.com"
+	res := callJMAP(t, h, acct, [3]any{"Email/query", map[string]any{"accountId": acct, "filter": map[string]any{"inMailbox": "drafts"}}, "c0"})
+	var q struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.Unmarshal(res[0], &q); err != nil || len(q.IDs) != 1 {
+		t.Fatalf("draft query: %v ids=%v err=%v", res[0], q.IDs, err)
+	}
+	draftID := q.IDs[0]
+	rawID, _ := base64.RawURLEncoding.DecodeString(draftID)
+	if _, up, ok := strings.Cut(string(rawID), "\x00"); !ok || up != upID {
+		t.Fatalf("draft id %s does not map to %s", draftID, upID)
+	}
+	res = callJMAP(t, h, acct, [3]any{"Email/set", map[string]any{
+		"accountId": acct,
+		"update":    map[string]any{draftID: map[string]any{"mailboxIds": map[string]bool{"sent": true}}},
+	}, "c1"})
+	var resp struct {
+		NotUpdated map[string]setErrBody `json:"notUpdated"`
+	}
+	if err := json.Unmarshal(res[0], &resp); err != nil || len(resp.NotUpdated) != 0 {
+		t.Fatalf("move set: %v %s", err, res[0])
+	}
+	moves, _, deletes := tp.counts()
+	if len(moves) != 0 {
+		t.Fatalf("move into Sent went upstream: %v", moves)
+	}
+	if deletes != 1 {
+		t.Fatalf("deletes = %d, want 1", deletes)
+	}
+	tp.fakeProvider.mu.Lock()
+	defer tp.fakeProvider.mu.Unlock()
+	if len(tp.msgs["drafts"]) != 0 || len(tp.msgs["sent"]) != 1 {
+		t.Fatalf("folders: drafts=%d sent=%d", len(tp.msgs["drafts"]), len(tp.msgs["sent"]))
 	}
 }
 

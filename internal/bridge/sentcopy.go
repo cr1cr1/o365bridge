@@ -2,7 +2,9 @@ package bridge
 
 import (
 	"bytes"
+	"context"
 	"strings"
+	"time"
 )
 
 // HeaderMessageID returns the trimmed Message-ID header value of a raw
@@ -43,4 +45,33 @@ func HeaderMessageID(mime []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(value.String())
+}
+
+// FolderHasMessageID reports whether the folder already holds a
+// message with this Message-ID. The send path stores its copy at the
+// same moment a client "places" the mail, so the listing is retried
+// briefly: listings lag. The returned error is the last listing
+// error; false with nil error means the folder surely lacks it.
+func FolderHasMessageID(ctx context.Context, p Provider, folderID, messageID string, retryDelay time.Duration) (bool, error) {
+	if messageID == "" {
+		return false, nil
+	}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(retryDelay)
+		}
+		metas, _, err := p.ListMessages(ctx, folderID, 0, 50)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		lastErr = nil
+		for _, m := range metas {
+			if m.MessageID == messageID {
+				return true, nil
+			}
+		}
+	}
+	return false, lastErr
 }

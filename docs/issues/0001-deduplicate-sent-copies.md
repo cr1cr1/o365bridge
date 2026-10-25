@@ -19,3 +19,10 @@ before falling back to storing. Stateless: no map, no timeout; it
 works across restarts and at any later time. When the folder cannot
 be listed, the copy is stored as before. Deleting the visible copy
 deletes the sent mail itself, as with Gmail.
+
+Update (2026-10-25): the same stateless rule now covers JMAP. A
+`Email/set` move into a Sent-equivalent mailbox checks the Sent
+folder for the Message-ID first; on a hit it drops the source copy
+instead of moving. The check lives in one shared helper
+(`bridge.FolderHasMessageID`), so IMAP APPEND and JMAP use the
+same retry and the same matching.

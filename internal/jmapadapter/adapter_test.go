@@ -81,6 +81,7 @@ func metaFromRaw(folder, id string, raw []byte, flags bridge.Flags) bridge.Messa
 	if msg, err := stdmail.ReadMessage(bytes.NewReader(raw)); err == nil {
 		m.Subject = msg.Header.Get("Subject")
 		m.From = msg.Header.Get("From")
+		m.MessageID = msg.Header.Get("Message-ID")
 		if d, err := msg.Header.Date(); err == nil {
 			m.Date = d
 		}
