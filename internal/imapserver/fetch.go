@@ -409,11 +409,15 @@ func (ss *session) cmdFetch(tag, rest string, lits [][]byte, uidMode bool) {
 			raw = b
 		}
 		// Non-PEEK BODY[]-class fetches set \Seen (RFC 3501 §6.4.5);
-		// BODY.PEEK / ENVELOPE / BODYSTRUCTURE do not.
+		// BODY.PEEK / ENVELOPE / BODYSTRUCTURE do not. RFC822.SIZE
+		// and RFC822.HEADER are metadata/header-only and must not mark
+		// read: clients fetch them during ordinary folder sync
+		// (Thunderbird's UID FETCH ... RFC822.SIZE ...) and that used
+		// to flip every new message to read on the first visit.
 		markSeen := false
 		for _, it := range items {
 			u := strings.ToUpper(it)
-			if strings.HasPrefix(u, "BODY[") || u == "RFC822" || strings.HasPrefix(u, "RFC822.") {
+			if strings.HasPrefix(u, "BODY[") || u == "RFC822" || u == "RFC822.TEXT" {
 				markSeen = true
 			}
 		}

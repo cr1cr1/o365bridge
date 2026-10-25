@@ -1087,6 +1087,54 @@ func TestStoreSeenThenFetchFlags(t *testing.T) {
 	}
 }
 
+// Metadata and header fetches must not mark messages read:
+// Thunderbird's folder sync fetches UID RFC822.SIZE FLAGS
+// BODY.PEEK[...] for new mail, and that used to flip every new
+// message to \Seen on the first folder visit.
+func TestFetchMetadataDoesNotMarkSeen(t *testing.T) {
+	prov, ln := startServer(t)
+	prov.addMessage("inbox", sampleRaw("Stay Unread", "x"), nil, time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC))
+	c := dial(t, ln)
+	c.login("a")
+	c.cmd("b", "SELECT INBOX")
+	for _, item := range []string{"(FLAGS)", "(UID RFC822.SIZE FLAGS)", "(RFC822.HEADER)", "(BODY.PEEK[HEADER])"} {
+		resp := c.cmd("f", "FETCH 1 "+item)
+		if !strings.Contains(joined(resp), "f OK") {
+			t.Fatalf("FETCH %s: %s", item, joined(resp))
+		}
+		if strings.Contains(joined(resp), `\Seen`) {
+			t.Fatalf("FETCH %s must not report \\Seen: %s", item, joined(resp))
+		}
+	}
+	prov.mu.Lock()
+	calls := len(prov.setFlags)
+	prov.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("provider SetFlags called %d times, want 0", calls)
+	}
+}
+
+// A full-body fetch (non-PEEK) still marks read, per RFC 3501.
+func TestFetchBodyMarksSeen(t *testing.T) {
+	prov, ln := startServer(t)
+	prov.addMessage("inbox", sampleRaw("Read Me", "x"), nil, time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC))
+	c := dial(t, ln)
+	c.login("a")
+	c.cmd("b", "SELECT INBOX")
+	resp := c.cmd("f", "FETCH 1 BODY[]")
+	if !strings.Contains(joined(resp), "f OK") {
+		t.Fatalf("FETCH BODY[]: %s", joined(resp))
+	}
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	if len(prov.setFlags) != 1 {
+		t.Fatalf("provider SetFlags calls = %d, want 1", len(prov.setFlags))
+	}
+	if !hasFlag(prov.setFlags[0].add, `\seen`) {
+		t.Fatalf("SetFlags add = %v, want \\seen", prov.setFlags[0].add)
+	}
+}
+
 func TestUIDSearchUnseen(t *testing.T) {
 	prov, ln := startServer(t)
 	prov.addMessage("inbox", sampleRaw("Seen One", "x"), bridge.Flags{"\\seen"}, time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC))
