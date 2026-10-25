@@ -89,7 +89,17 @@ func (p *provider) DeleteFolder(ctx context.Context, id string) error {
 	return err
 }
 
-func (p *provider) RenameFolder(ctx context.Context, id, name string) error {
+// RenameFolder renames and/or moves a folder. Empty name keeps the
+// current display name; empty parentID keeps the current parent.
+func (p *provider) RenameFolder(ctx context.Context, id, name, parentID string) error {
+	if parentID != "" {
+		if err := p.doJSON(ctx, http.MethodPost, "/me/mailFolders/"+esc(id)+"/move", map[string]any{"destinationId": parentID}, nil); err != nil {
+			return err
+		}
+	}
+	if name == "" {
+		return nil
+	}
 	return p.doJSON(ctx, http.MethodPatch, "/me/mailFolders/"+esc(id), map[string]any{"displayName": name}, nil)
 }
 

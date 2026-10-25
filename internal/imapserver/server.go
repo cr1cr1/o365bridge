@@ -978,12 +978,31 @@ func (ss *session) cmdRename(tag, rest string, lits [][]byte) {
 		_ = ss.failNO(tag, err)
 		return
 	}
+	// The destination is a path: parent folder plus new leaf. Clients
+	// move folders this way — Thunderbird deletes a folder by renaming
+	// it into the trash ("Deleted Items/<name>").
 	leaf := newName
+	parentPath := ""
 	if i := strings.LastIndex(newName, "/"); i >= 0 {
 		leaf = newName[i+1:]
+		parentPath = strings.TrimSpace(newName[:i])
+	}
+	parentID := ""
+	if parentPath != "" {
+		parent, _, err := ss.resolveFolder(parentPath)
+		if err != nil {
+			_ = ss.failNO(tag, err)
+			return
+		}
+		if parent.ID != folder.ParentID {
+			parentID = parent.ID
+		}
+	}
+	if leaf == folder.Name {
+		leaf = ""
 	}
 	err = ss.call(func(ctx context.Context, p bridge.Provider) error {
-		return p.RenameFolder(ctx, folder.ID, leaf)
+		return p.RenameFolder(ctx, folder.ID, leaf, parentID)
 	})
 	if err != nil {
 		_ = ss.no(tag, err)

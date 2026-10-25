@@ -207,7 +207,7 @@ type Provider interface {
 	ListFolders(ctx context.Context) ([]Folder, error)
 	CreateFolder(ctx context.Context, name, parentID string) (Folder, error)
 	DeleteFolder(ctx context.Context, id string) error
-	RenameFolder(ctx context.Context, id, name string) error
+	RenameFolder(ctx context.Context, id, name, parentID string) error
 
 	ListMessages(ctx context.Context, folderID string, offset, limit int) ([]MessageMeta, int, error)
 	GetMessage(ctx context.Context, folderID, id string) (MessageMeta, error)

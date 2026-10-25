@@ -138,7 +138,7 @@ func (s *mailboxStore) Update(ctx context.Context, account jmap.ID, obj jmail.Ma
 	}
 	if cur.Name != obj.Name {
 		err := s.b.call(ctx, string(account), "RenameFolder", func(ctx context.Context, p bridge.Provider) error {
-			return p.RenameFolder(ctx, string(obj.ID), obj.Name)
+			return p.RenameFolder(ctx, string(obj.ID), obj.Name, "")
 		})
 		if err != nil {
 			return nil, &jmap.SetError{Type: "serverFail", Description: err.Error()}

@@ -173,7 +173,7 @@ func TestFolderCreateChildRenameDelete(t *testing.T) {
 		t.Errorf("path %s", f.last().Path)
 	}
 
-	if err := p.RenameFolder(ctx, "new1", "Renamed"); err != nil {
+	if err := p.RenameFolder(ctx, "new1", "Renamed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if f.last().Method != "PATCH" || bodyJSON(t, f.last().Body)["displayName"] != "Renamed" {

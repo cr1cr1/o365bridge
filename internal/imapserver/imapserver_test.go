@@ -105,12 +105,17 @@ func (p *fakeProvider) DeleteFolder(_ context.Context, id string) error {
 	return nil
 }
 
-func (p *fakeProvider) RenameFolder(_ context.Context, id, name string) error {
+func (p *fakeProvider) RenameFolder(_ context.Context, id, name, parentID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i := range p.folders {
 		if p.folders[i].ID == id {
-			p.folders[i].Name = name
+			if name != "" {
+				p.folders[i].Name = name
+			}
+			if parentID != "" {
+				p.folders[i].ParentID = parentID
+			}
 		}
 	}
 	return nil
@@ -1337,6 +1342,46 @@ func TestSuspendedAccountFailsIMAPWithReason(t *testing.T) {
 	prov.mu.Unlock()
 	if calls != 0 {
 		t.Fatalf("expected exactly one upstream probe, knob left = %d", calls)
+	}
+}
+
+// RENAME with a destination path moves the folder into that parent —
+// Thunderbird deletes folders by renaming them into the trash
+// ("Deleted Items/<name>"), which used to fail with "mailbox does not
+// exist" and left the folder in place upstream.
+func TestRenameMovesFolderIntoParent(t *testing.T) {
+	prov, ln := startServer(t)
+	c := dial(t, ln)
+	c.login("a")
+	if r := c.cmd("a", "CREATE Extra"); !strings.Contains(joined(r), "a OK") {
+		t.Fatalf("CREATE Extra: %s", joined(r))
+	}
+	// The Thunderbird folder-delete flow: rename into the trash path.
+	if r := c.cmd("b", "RENAME Extra \"Deleted Items/Extra\""); !strings.Contains(joined(r), "b OK") {
+		t.Fatalf("RENAME into trash: %s", joined(r))
+	}
+	prov.mu.Lock()
+	for _, f := range prov.folders {
+		if f.Name == "Extra" && f.ParentID != "trash" {
+			prov.mu.Unlock()
+			t.Fatalf("Extra not moved into trash, parent = %q", f.ParentID)
+		}
+	}
+	prov.mu.Unlock()
+	// Plain rename in place still works.
+	if r := c.cmd("d", "RENAME \"Deleted Items/Extra\" \"Deleted Items/Renamed\""); !strings.Contains(joined(r), "d OK") {
+		t.Fatalf("plain path rename: %s", joined(r))
+	}
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	found := false
+	for _, f := range prov.folders {
+		if f.Name == "Renamed" && f.ParentID == "trash" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("renamed folder missing: %+v", prov.folders)
 	}
 }
 

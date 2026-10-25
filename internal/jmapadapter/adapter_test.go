@@ -152,12 +152,17 @@ func (p *fakeProvider) DeleteFolder(_ context.Context, id string) error {
 	}
 	return nil
 }
-func (p *fakeProvider) RenameFolder(_ context.Context, id, name string) error {
+func (p *fakeProvider) RenameFolder(_ context.Context, id, name, parentID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i := range p.folders {
 		if p.folders[i].ID == id {
-			p.folders[i].Name = name
+			if name != "" {
+				p.folders[i].Name = name
+			}
+			if parentID != "" {
+				p.folders[i].ParentID = parentID
+			}
 		}
 	}
 	return nil
