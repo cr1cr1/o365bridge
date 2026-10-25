@@ -140,62 +140,70 @@ func (ss *session) cmdStore(tag, rest string, lits [][]byte, uidMode bool) {
 			}
 		}
 	}
-	ss.moveDeletedNow(idxs)
+	ss.deleteMarkedNow(idxs)
 	_ = ss.tagged(tag, "OK", "STORE completed")
 }
 
-// moveDeletedNow makes a \Deleted mark act at once: every newly marked
-// message moves to the account's trash folder upstream, then leaves
-// the selected view with untagged EXPUNGE responses (descending, so
-// sequence numbers stay valid). Clients that only mark — without a
-// following EXPUNGE — still get a working delete. Inside the trash
-// itself the mark stays session-local so a following EXPUNGE removes
-// the message permanently. If the upstream move fails, the mark stays
-// session-local and the next EXPUNGE retries the removal.
-func (ss *session) moveDeletedNow(idxs []int) {
-	if ss.sel == nil || ss.sel.folder.Special == "trash" {
+// deleteMarkedNow makes a \Deleted mark act at once, so clients that
+// only mark — without a following EXPUNGE — still get a working
+// delete. Outside the trash: the marked messages move to the account's
+// trash folder upstream. Inside any folder marked as trash: the marked
+// messages are removed permanently upstream. In both cases the
+// messages then leave the selected view with untagged EXPUNGE
+// responses (descending, so sequence numbers stay valid). If the
+// upstream call fails, the mark stays session-local and the next
+// EXPUNGE retries the removal.
+func (ss *session) deleteMarkedNow(idxs []int) {
+	if ss.sel == nil {
 		return
 	}
-	var moveIdxs []int
+	var markIdxs []int
 	var ids []string
 	for _, i := range idxs {
 		if i < len(ss.sel.msgs) && hasBridgeFlag([]string(ss.sel.msgs[i].meta.Flags), "\\deleted") {
-			moveIdxs = append(moveIdxs, i)
+			markIdxs = append(markIdxs, i)
 			ids = append(ids, ss.sel.msgs[i].meta.ID)
 		}
 	}
 	if len(ids) == 0 {
 		return
 	}
-	folders, err := ss.listFolders()
-	if err != nil {
-		ss.srv.logger.Warn().Err(err).Str("protocol", "imap").Str("op", "store").
-			Str("account", ss.email).Msg("trash lookup failed, keeping \\Deleted session-local")
-		return
-	}
-	trashID := ""
-	for _, f := range folders {
-		if f.Special == "trash" {
-			trashID = f.ID
-			break
+	src := ss.sel.folder.ID
+	inTrash := ss.sel.folder.Special == "trash"
+	var err error
+	if inTrash {
+		err = ss.call(func(ctx context.Context, p bridge.Provider) error {
+			return p.DeleteMessages(ctx, src, ids)
+		})
+	} else {
+		var folders []bridge.Folder
+		folders, err = ss.listFolders()
+		if err == nil {
+			trashID := ""
+			for _, f := range folders {
+				if f.Special == "trash" {
+					trashID = f.ID
+					break
+				}
+			}
+			if trashID == "" {
+				return
+			}
+			err = ss.call(func(ctx context.Context, p bridge.Provider) error {
+				return p.MoveMessages(ctx, src, ids, trashID)
+			})
 		}
 	}
-	if trashID == "" {
-		return
-	}
-	src := ss.sel.folder.ID
-	if err := ss.call(func(ctx context.Context, p bridge.Provider) error {
-		return p.MoveMessages(ctx, src, ids, trashID)
-	}); err != nil {
+	if err != nil {
 		ss.srv.logger.Warn().Err(err).Str("protocol", "imap").Str("op", "store").
-			Str("account", ss.email).Msg("\\Deleted move failed, keeping mark session-local")
+			Str("account", ss.email).Msg("\\Deleted action failed, keeping mark session-local")
 		return
 	}
-	for k := len(moveIdxs) - 1; k >= 0; k-- {
-		_ = ss.printf("* %d EXPUNGE", moveIdxs[k]+1)
+	for k := len(markIdxs) - 1; k >= 0; k-- {
+		_ = ss.printf("* %d EXPUNGE", markIdxs[k]+1)
 	}
 	removed := map[int]bool{}
-	for _, i := range moveIdxs {
+	for _, i := range markIdxs {
 		removed[i] = true
 		delete(ss.deleted, ss.sel.msgs[i].uid)
 	}

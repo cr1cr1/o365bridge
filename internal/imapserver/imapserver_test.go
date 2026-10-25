@@ -1135,10 +1135,14 @@ func TestStoreDeletedMovesToTrashImmediately(t *testing.T) {
 	if trashLen != 1 {
 		t.Fatalf("trash len after mark = %d, want 1", trashLen)
 	}
-	// The permanent step: mark inside the trash, then EXPUNGE removes
-	// for good (provider DeleteMessages, no further move).
+	// The permanent step: marking inside any trash-marked folder
+	// removes permanently at once (provider DeleteMessages, no
+	// further move); a following EXPUNGE is a harmless no-op.
 	c.cmd("d", "SELECT \"Deleted Items\"")
-	c.cmd("e", `STORE 1 +FLAGS (\Deleted)`)
+	store2 := c.cmd("e", `STORE 1 +FLAGS (\Deleted)`)
+	if !strings.Contains(joined(store2), "EXPUNGE") {
+		t.Fatalf("marking in trash must emit EXPUNGE after the delete: %s", joined(store2))
+	}
 	prov.mu.Lock()
 	moves := len(prov.movedTo)
 	prov.mu.Unlock()

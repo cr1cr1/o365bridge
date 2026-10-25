@@ -9,13 +9,13 @@ Exchange has no `\Deleted` flag, so nothing was stored or deleted
 upstream.
 
 Fix: marking `\Deleted` now acts immediately and is not
-Thunderbird-specific. The marked messages move to the account's
-Deleted Items folder upstream, then leave the selected view with
-untagged EXPUNGE responses. EXPUNGE deletes permanently upstream
-(OWA `HardDelete`) instead of moving to trash. Marking inside the
-trash folder itself stays session-local so a following EXPUNGE removes
-those messages for good. If the upstream move fails, the mark stays
-session-local and the next EXPUNGE retries the removal.
+Thunderbird-specific. Outside the trash, the marked messages move to
+the account's Deleted Items folder upstream; inside any folder marked
+as trash, the marked messages are removed permanently upstream (OWA
+`HardDelete`). In both cases the messages then leave the selected view
+with untagged EXPUNGE responses. EXPUNGE also removes permanently. If
+the upstream call fails, the mark stays session-local and the next
+EXPUNGE retries the removal.
 
 Unmarking a message after the move cannot restore it: the message is
 in Deleted Items, recoverable like any deleted mail.
