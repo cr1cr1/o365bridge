@@ -146,14 +146,13 @@ func (ss *session) cmdStore(tag, rest string, lits [][]byte, uidMode bool) {
 
 // deleteMarkedNow makes a \Deleted mark act at once, so clients that
 // only mark — without a following EXPUNGE — still get a working
-// delete. Outside the trash: the marked messages move to the account's
-// trash folder upstream. Inside any folder marked as trash or drafts:
-// the marked messages are removed permanently upstream (deleted mail
-// would only move in a circle; a discarded draft is a working copy,
-// and send flows rely on its removal). In both cases the messages then
-// leave the selected view with untagged EXPUNGE responses (descending,
-// so sequence numbers stay valid). If the upstream call fails, the
-// mark stays session-local and the next EXPUNGE retries the removal.
+// delete. The mark is the permanent-delete gesture: clients send their
+// own UID MOVE to trash for regular deletes, so a mark with no
+// following client move means "remove for good". The marked messages
+// are deleted permanently upstream, then leave the selected view with
+// untagged EXPUNGE responses (descending, so sequence numbers stay
+// valid). If the upstream delete fails, the mark stays session-local
+// and the next EXPUNGE retries the removal.
 func (ss *session) deleteMarkedNow(idxs []int) {
 	if ss.sel == nil {
 		return
@@ -170,34 +169,11 @@ func (ss *session) deleteMarkedNow(idxs []int) {
 		return
 	}
 	src := ss.sel.folder.ID
-	inTrash := ss.sel.folder.Special == "trash" || ss.sel.folder.Special == "drafts"
-	var err error
-	if inTrash {
-		err = ss.call(func(ctx context.Context, p bridge.Provider) error {
-			return p.DeleteMessages(ctx, src, ids)
-		})
-	} else {
-		var folders []bridge.Folder
-		folders, err = ss.listFolders()
-		if err == nil {
-			trashID := ""
-			for _, f := range folders {
-				if f.Special == "trash" {
-					trashID = f.ID
-					break
-				}
-			}
-			if trashID == "" {
-				return
-			}
-			err = ss.call(func(ctx context.Context, p bridge.Provider) error {
-				return p.MoveMessages(ctx, src, ids, trashID)
-			})
-		}
-	}
-	if err != nil {
+	if err := ss.call(func(ctx context.Context, p bridge.Provider) error {
+		return p.DeleteMessages(ctx, src, ids)
+	}); err != nil {
 		ss.srv.logger.Warn().Err(err).Str("protocol", "imap").Str("op", "store").
-			Str("account", ss.email).Msg("\\Deleted action failed, keeping mark session-local")
+			Str("account", ss.email).Msg("\\Deleted delete failed, keeping mark session-local")
 		return
 	}
 	for k := len(markIdxs) - 1; k >= 0; k-- {

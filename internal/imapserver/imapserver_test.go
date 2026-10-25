@@ -58,7 +58,7 @@ type fakeProvider struct {
 	appendedTo     []string
 	createdName    []string
 	failListMsgs   bool
-	failMoveMsgs   bool
+	failDeleteMsgs int // fail this many DeleteMessages calls
 	listMissesLeft int // simulate listing lag: hide results this many calls
 }
 
@@ -234,9 +234,6 @@ func (p *fakeProvider) SetFlags(_ context.Context, folderID string, ids []string
 func (p *fakeProvider) MoveMessages(_ context.Context, folderID string, ids []string, dest string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.failMoveMsgs {
-		return fmt.Errorf("fake: move disabled")
-	}
 	p.movedTo = append(p.movedTo, dest)
 	p.movedIDs = append(p.movedIDs, ids...)
 	var remain []*fakeMsg
@@ -279,6 +276,10 @@ func (p *fakeProvider) CopyMessages(_ context.Context, folderID string, ids []st
 func (p *fakeProvider) DeleteMessages(_ context.Context, folderID string, ids []string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.failDeleteMsgs > 0 {
+		p.failDeleteMsgs--
+		return fmt.Errorf("fake: delete disabled")
+	}
 	p.deleted = append(p.deleted, append([]string(nil), ids...))
 	var remain []*fakeMsg
 	for _, m := range p.msgs[folderID] {
@@ -1217,11 +1218,11 @@ func TestIdleEmitsExists(t *testing.T) {
 	}
 }
 
-// A \Deleted mark acts at once: the message moves to the account's
-// trash folder upstream and leaves the selected view with an untagged
-// EXPUNGE. Clients that only mark, without a following EXPUNGE, still
-// get a working delete.
-func TestStoreDeletedMovesToTrashImmediately(t *testing.T) {
+// A \Deleted mark is the permanent-delete gesture: clients send their
+// own UID MOVE to trash for regular deletes. The marked message is
+// deleted permanently upstream at once and leaves the selected view
+// with an untagged EXPUNGE.
+func TestStoreDeletedRemovesPermanently(t *testing.T) {
 	prov, ln := startServer(t)
 	id := prov.addMessage("inbox", sampleRaw("DeleteMe", "x"), nil, time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC))
 	prov.addMessage("inbox", sampleRaw("KeepMe", "x"), nil, time.Date(2006, 1, 3, 15, 4, 5, 0, time.UTC))
@@ -1234,42 +1235,13 @@ func TestStoreDeletedMovesToTrashImmediately(t *testing.T) {
 		t.Fatalf("STORE: %s", j)
 	}
 	if !strings.Contains(j, "EXPUNGE") {
-		t.Fatalf("marking \\Deleted must emit EXPUNGE after the move: %s", j)
-	}
-	prov.mu.Lock()
-	movedTo := append([]string(nil), prov.movedTo...)
-	inboxLen := len(prov.msgs["inbox"])
-	trashLen := len(prov.msgs["trash"])
-	prov.mu.Unlock()
-	if len(movedTo) != 1 || movedTo[0] != "trash" {
-		t.Fatalf("movedTo = %v, want [trash]", movedTo)
-	}
-	if inboxLen != 1 {
-		t.Fatalf("inbox len after mark = %d, want 1", inboxLen)
-	}
-	if trashLen != 1 {
-		t.Fatalf("trash len after mark = %d, want 1", trashLen)
-	}
-	// The permanent step: marking inside any trash-marked folder
-	// removes permanently at once (provider DeleteMessages, no
-	// further move); a following EXPUNGE is a harmless no-op.
-	c.cmd("d", "SELECT \"Deleted Items\"")
-	store2 := c.cmd("e", `STORE 1 +FLAGS (\Deleted)`)
-	if !strings.Contains(joined(store2), "EXPUNGE") {
-		t.Fatalf("marking in trash must emit EXPUNGE after the delete: %s", joined(store2))
-	}
-	prov.mu.Lock()
-	moves := len(prov.movedTo)
-	prov.mu.Unlock()
-	if moves != 1 {
-		t.Fatalf("marking inside trash must not move again: %d moves", moves)
-	}
-	exp := c.cmd("f", "EXPUNGE")
-	if !strings.Contains(joined(exp), "f OK") {
-		t.Fatalf("EXPUNGE: %s", joined(exp))
+		t.Fatalf("marking \\Deleted must emit EXPUNGE after the delete: %s", j)
 	}
 	prov.mu.Lock()
 	defer prov.mu.Unlock()
+	if len(prov.movedTo) != 0 {
+		t.Fatalf("permanent delete must not move to trash: %v", prov.movedTo)
+	}
 	found := false
 	for _, del := range prov.deleted {
 		for _, d := range del {
@@ -1281,29 +1253,33 @@ func TestStoreDeletedMovesToTrashImmediately(t *testing.T) {
 	if !found {
 		t.Fatalf("provider DeleteMessages not called with %s: %v", id, prov.deleted)
 	}
+	if len(prov.msgs["inbox"]) != 1 {
+		t.Fatalf("inbox len after mark = %d, want 1", len(prov.msgs["inbox"]))
+	}
 	if len(prov.msgs["trash"]) != 0 {
-		t.Fatalf("trash len after expunge = %d, want 0", len(prov.msgs["trash"]))
+		t.Fatalf("trash len after mark = %d, want 0", len(prov.msgs["trash"]))
 	}
 }
 
-// When the upstream move fails, the mark stays session-local and the
-// following EXPUNGE still removes the message permanently.
-func TestExpungeRemovesWhenTrashMoveFails(t *testing.T) {
+// When the upstream delete fails, the mark stays session-local and the
+// following EXPUNGE retries the permanent removal.
+func TestExpungeRetriesWhenDeleteFails(t *testing.T) {
 	prov, ln := startServer(t)
 	id := prov.addMessage("inbox", sampleRaw("DeleteMe", "x"), nil, time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC))
 	c := dial(t, ln)
 	c.login("a")
 	c.cmd("b", "SELECT INBOX")
 	prov.mu.Lock()
-	prov.failMoveMsgs = true
+	prov.failDeleteMsgs = 1
 	prov.mu.Unlock()
 	store := c.cmd("c", `STORE 1 +FLAGS (\Deleted)`)
-	if !strings.Contains(joined(store), "c OK") {
-		t.Fatalf("STORE: %s", joined(store))
+	j := joined(store)
+	if !strings.Contains(j, "c OK") {
+		t.Fatalf("STORE: %s", j)
 	}
-	prov.mu.Lock()
-	prov.failMoveMsgs = false
-	prov.mu.Unlock()
+	if strings.Contains(j, "EXPUNGE") {
+		t.Fatalf("a failed delete must not emit EXPUNGE: %s", j)
+	}
 	exp := c.cmd("d", "EXPUNGE")
 	if !strings.Contains(joined(exp), "d OK") {
 		t.Fatalf("EXPUNGE: %s", joined(exp))
