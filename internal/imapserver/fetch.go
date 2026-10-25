@@ -216,7 +216,7 @@ func (ss *session) cmdCopyMove(tag, rest string, lits [][]byte, uidMode bool, mo
 	}
 	dest, _, err := ss.resolveFolder(destName)
 	if err != nil {
-		_ = ss.tagged(tag, "NO", sanitize(err.Error()))
+		_ = ss.failNO(tag, err)
 		return
 	}
 	var ids []string

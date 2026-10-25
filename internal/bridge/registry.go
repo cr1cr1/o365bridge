@@ -374,3 +374,12 @@ func (r *Registry) DegradedReason(email string) (string, bool) {
 	}
 	return "account suspended upstream: verify the account in Outlook on the web, then retry", true
 }
+
+// DegradedError marks the fail-fast error returned while an account is
+// degraded, so protocols can attach the right response code (IMAP
+// [ALERT], which clients must display to the user).
+type DegradedError struct {
+	Reason string
+}
+
+func (e *DegradedError) Error() string { return e.Reason }

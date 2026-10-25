@@ -1329,6 +1329,9 @@ func TestSuspendedAccountFailsIMAPWithReason(t *testing.T) {
 	if !strings.Contains(j, "d NO") || !strings.Contains(j, "suspended") {
 		t.Fatalf("STATUS must fail fast with the reason: %s", j)
 	}
+	if !strings.Contains(j, "[ALERT]") {
+		t.Fatalf("degraded NO must carry [ALERT] so clients display it: %s", j)
+	}
 	prov.mu.Lock()
 	calls := prov.suspendListErr
 	prov.mu.Unlock()

@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -194,13 +195,24 @@ func (ss *session) tagged(tag, status, text string) error {
 	return ss.printf("%s %s %s", tag, status, sanitize(text))
 }
 
+// failNO reports err as a tagged NO, carrying [ALERT] for degraded
+// accounts so clients display the reason (RFC 3501 §7.1). Use for any
+// error that may originate upstream.
+func (ss *session) failNO(tag string, err error) error {
+	var de *bridge.DegradedError
+	if errors.As(err, &de) {
+		return ss.printf("%s NO [ALERT] %s", tag, sanitize(de.Reason))
+	}
+	return ss.tagged(tag, "NO", sanitize(err.Error()))
+}
+
 // no reports an upstream failure to the client AND leaves a
 // warning in the bridge log, per account and operation (these
 // failures used to be invisible above debug).
 func (ss *session) no(tag string, err error) error {
 	ss.srv.logger.Warn().Err(err).Str("protocol", "imap").Str("op", strings.ToLower(ss.cmd)).
 		Str("account", ss.email).Msg("imap operation failed")
-	return ss.tagged(tag, "NO", err.Error())
+	return ss.failNO(tag, err)
 }
 
 // logAuth records an IMAP auth attempt per account: info on
@@ -219,7 +231,7 @@ func (ss *session) call(op func(context.Context, bridge.Provider) error) error {
 	// fail commands with the recorded reason instead of letting the
 	// client see silently empty folders.
 	if reason, degraded := ss.srv.reg.DegradedReason(ss.email); degraded {
-		return fmt.Errorf("bridge: %s", reason)
+		return &bridge.DegradedError{Reason: reason}
 	}
 	return ss.srv.reg.Call(context.Background(), ss.email, op)
 }
@@ -830,7 +842,7 @@ func (ss *session) cmdSelect(tag, rest string, lits [][]byte, examine bool) {
 	}
 	folder, display, err := ss.resolveFolder(name)
 	if err != nil {
-		_ = ss.tagged(tag, "NO", sanitize(err.Error()))
+		_ = ss.failNO(tag, err)
 		return
 	}
 	ss.sel = &selected{name: display, folder: folder, readonly: examine}
@@ -869,7 +881,7 @@ func (ss *session) cmdStatus(tag, rest string, lits [][]byte) {
 	itemsStr := extractParen(p.rest())
 	folder, display, err := ss.resolveFolder(name)
 	if err != nil {
-		_ = ss.tagged(tag, "NO", sanitize(err.Error()))
+		_ = ss.failNO(tag, err)
 		return
 	}
 	entries, err := ss.listEntries(folder.ID)
@@ -934,7 +946,7 @@ func (ss *session) cmdDelete(tag, rest string, lits [][]byte) {
 	}
 	folder, _, err := ss.resolveFolder(name)
 	if err != nil {
-		_ = ss.tagged(tag, "NO", sanitize(err.Error()))
+		_ = ss.failNO(tag, err)
 		return
 	}
 	err = ss.call(func(ctx context.Context, p bridge.Provider) error {
@@ -963,7 +975,7 @@ func (ss *session) cmdRename(tag, rest string, lits [][]byte) {
 	}
 	folder, _, err := ss.resolveFolder(oldName)
 	if err != nil {
-		_ = ss.tagged(tag, "NO", sanitize(err.Error()))
+		_ = ss.failNO(tag, err)
 		return
 	}
 	leaf := newName
@@ -1021,7 +1033,7 @@ func (ss *session) cmdAppend(tag, rest string, lits [][]byte) {
 	}
 	folder, _, err := ss.resolveFolder(name)
 	if err != nil {
-		_ = ss.tagged(tag, "NO", sanitize(err.Error()))
+		_ = ss.failNO(tag, err)
 		return
 	}
 	// The upstream send already stored a Sent copy (SendAndSaveCopy /
