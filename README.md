@@ -37,6 +37,7 @@ Login:
 - No account setup is needed before the first connection.
 - Sessions renew silently where possible. If Microsoft asks again (about every three months), the next operation waits for that window.
 - Multiple accounts: add each with its own email, same bridge password.
+- Work and personal accounts (`outlook.com`, `hotmail.com`) sign in the same way. The bridge does not treat them differently.
 - Accounts stay separate: login, browser profile, session, state directory.
 - Tests cover two-account isolation (registry, IMAP, SMTP, CalDAV/CardDAV) against fakes. Two real Microsoft accounts are a manual check.
 
@@ -239,7 +240,6 @@ Files:
 ## Not supported
 
 - EWS, EAS
-- Personal Microsoft accounts (outlook.com, hotmail.com)
 - OneDrive/WebDAV files
 - Headless or multi-user use
 - Management UI
